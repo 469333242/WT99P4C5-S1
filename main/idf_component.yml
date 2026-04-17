@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=4.1.0'
+  espressif/esp_wifi_remote: '*'
+  espressif/esp_hosted: '*'
+  esp_video:
+    version: 0.8.*
+    public: true
+  espressif/esp_h264: ^1.0.2
