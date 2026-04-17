@@ -1,6 +1,6 @@
 /**
  * @file tf_card.h
- * @brief TF card basic driver interface
+ * @brief TF 卡基础驱动接口
  */
 
 #pragma once
@@ -15,8 +15,8 @@
 extern "C" {
 #endif
 
-/* Hardware configuration for WT99P4C5-S1.
- * Slot1 is already used by ESP-Hosted, so TF uses Slot0 by default.
+/* WT99P4C5-S1 的 TF 卡硬件连接配置。
+ * Slot1 已被 ESP-Hosted 占用，因此 TF 卡默认使用 Slot0。
  */
 #define TF_CARD_SDMMC_SLOT              SDMMC_HOST_SLOT_0
 #define TF_CARD_CLK_PIN                 GPIO_NUM_43
@@ -36,7 +36,7 @@ extern "C" {
 
 #define TF_CARD_MOUNT_POINT             "/sdcard"
 
-/* Driver parameters */
+/* 驱动参数 */
 #define TF_CARD_MAX_OPEN_FILES              8
 #define TF_CARD_ALLOC_UNIT_SIZE             (16 * 1024)
 #define TF_CARD_SPEED_TEST_BUFFER_SIZE      (64 * 1024)

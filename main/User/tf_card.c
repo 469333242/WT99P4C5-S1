@@ -1,6 +1,6 @@
 /**
  * @file tf_card.c
- * @brief TF card basic driver implementation
+ * @brief TF 卡基础驱动实现
  */
 
 #include <stdio.h>
@@ -58,7 +58,7 @@ static esp_err_t tf_card_ensure_lock(void)
 
     s_tf.lock = xSemaphoreCreateMutex();
     if (!s_tf.lock) {
-        ESP_LOGE(TAG, "create lock failed");
+        ESP_LOGE(TAG, "创建互斥锁失败");
         return ESP_ERR_NO_MEM;
     }
 
@@ -106,7 +106,7 @@ static esp_err_t tf_card_power_ctrl_set_voltage(void *ctx, int voltage_mv)
     }
 
     ESP_RETURN_ON_ERROR(esp_ldo_channel_adjust_voltage(pwr_ctx->ldo_chan, voltage_mv),
-                        TAG, "adjust TF LDO voltage failed");
+                        TAG, "调整 TF LDO 电压失败");
     pwr_ctx->voltage_mv = voltage_mv;
     return ESP_OK;
 }
@@ -127,7 +127,7 @@ static void tf_card_release_power_ctrl_locked(void)
         ret = esp_ldo_release_channel(pwr_ctx->ldo_chan);
     }
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "release TF power control failed: 0x%x (%s)", ret, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "释放 TF 供电控制失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         return;
     }
 
@@ -151,10 +151,10 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
             .flags.adjustable = true,
         };
 
-        /* P4 boards need TF IO power enabled before card negotiation starts. */
+        /* P4 板卡在 TF 协商前需要先打开 TF IO 电源。 */
         s_tf.pwr_ctrl_handle = calloc(1, sizeof(sd_pwr_ctrl_drv_t));
         if (!s_tf.pwr_ctrl_handle) {
-            ESP_LOGE(TAG, "create TF power control handle failed");
+            ESP_LOGE(TAG, "创建 TF 供电控制句柄失败");
             return ESP_ERR_NO_MEM;
         }
 
@@ -162,7 +162,7 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
         if (!pwr_ctx) {
             free(s_tf.pwr_ctrl_handle);
             s_tf.pwr_ctrl_handle = NULL;
-            ESP_LOGE(TAG, "create TF power control context failed");
+            ESP_LOGE(TAG, "创建 TF 供电控制上下文失败");
             return ESP_ERR_NO_MEM;
         }
 
@@ -171,7 +171,7 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
             free(pwr_ctx);
             free(s_tf.pwr_ctrl_handle);
             s_tf.pwr_ctrl_handle = NULL;
-            ESP_LOGE(TAG, "acquire TF LDO channel failed: 0x%x (%s)", ret, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "申请 TF LDO 通道失败: 0x%x (%s)", ret, esp_err_to_name(ret));
             return ret;
         }
 
@@ -184,7 +184,7 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
 
     if (!pwr_ctx) {
         tf_card_release_power_ctrl_locked();
-        ESP_LOGE(TAG, "invalid TF power control context");
+        ESP_LOGE(TAG, "TF 供电控制上下文无效");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -192,7 +192,7 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
         ret = tf_card_power_ctrl_set_voltage(pwr_ctx, voltage_mv);
         if (ret != ESP_OK) {
             tf_card_release_power_ctrl_locked();
-            ESP_LOGE(TAG, "set TF IO voltage failed: 0x%x (%s)", ret, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "设置 TF IO 电压失败: 0x%x (%s)", ret, esp_err_to_name(ret));
             return ret;
         }
     }
@@ -224,7 +224,7 @@ static esp_err_t tf_card_get_info_locked(tf_card_info_t *out_info)
 
     ret = esp_vfs_fat_info(TF_CARD_MOUNT_POINT, &total_bytes, &free_bytes);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "read FATFS info failed: 0x%x", ret);
+        ESP_LOGE(TAG, "读取 FATFS 信息失败: 0x%x", ret);
         return ret;
     }
 
@@ -265,7 +265,7 @@ esp_err_t tf_card_init(void)
         .use_one_fat = false,
     };
 
-    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "lock init failed");
+    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");
 
     xSemaphoreTake(s_tf.lock, portMAX_DELAY);
     if (s_tf.mounted) {
@@ -275,7 +275,7 @@ esp_err_t tf_card_init(void)
 
     memset(&s_tf.last_speed_test, 0, sizeof(s_tf.last_speed_test));
 
-    /* Slot1 is used by ESP-Hosted, TF stays on Slot0. */
+    /* Slot1 已给 ESP-Hosted 使用，TF 卡固定走 Slot0。 */
     host.slot = TF_CARD_SDMMC_SLOT;
     host.max_freq_khz = TF_CARD_MAX_FREQ_KHZ;
 
@@ -292,10 +292,10 @@ esp_err_t tf_card_init(void)
         tf_card_release_power_ctrl_locked();
         xSemaphoreGive(s_tf.lock);
         if (ret == ESP_ERR_TIMEOUT) {
-            ESP_LOGE(TAG, "TF card mount failed: 0x%x (%s), check TF power and SDMMC wiring first",
+            ESP_LOGE(TAG, "TF 卡挂载失败: 0x%x (%s)，请优先检查 TF 供电和 SDMMC 连线",
                      ret, esp_err_to_name(ret));
         } else {
-            ESP_LOGE(TAG, "TF card mount failed: 0x%x (%s)", ret, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "TF 卡挂载失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         }
         return ret;
     }
@@ -303,8 +303,7 @@ esp_err_t tf_card_init(void)
     s_tf.mounted = true;
     xSemaphoreGive(s_tf.lock);
 
-    ESP_LOGI(TAG, "TF card mounted at %s", TF_CARD_MOUNT_POINT);
-    sdmmc_card_print_info(stdout, s_tf.card);
+    ESP_LOGI(TAG, "TF 卡已挂载到 %s", TF_CARD_MOUNT_POINT);
     tf_card_log_status();
     return ESP_OK;
 }
@@ -313,7 +312,7 @@ esp_err_t tf_card_deinit(void)
 {
     esp_err_t ret = ESP_OK;
 
-    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "lock init failed");
+    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");
 
     xSemaphoreTake(s_tf.lock, portMAX_DELAY);
     if (!s_tf.mounted || !s_tf.card) {
@@ -328,9 +327,9 @@ esp_err_t tf_card_deinit(void)
         s_tf.card = NULL;
         memset(&s_tf.last_speed_test, 0, sizeof(s_tf.last_speed_test));
         tf_card_release_power_ctrl_locked();
-        ESP_LOGI(TAG, "TF card unmounted");
+        ESP_LOGI(TAG, "TF 卡已卸载");
     } else {
-        ESP_LOGE(TAG, "TF card unmount failed: 0x%x (%s)", ret, esp_err_to_name(ret));
+        ESP_LOGE(TAG, "TF 卡卸载失败: 0x%x (%s)", ret, esp_err_to_name(ret));
     }
     xSemaphoreGive(s_tf.lock);
 
@@ -361,7 +360,7 @@ esp_err_t tf_card_get_info(tf_card_info_t *out_info)
 {
     esp_err_t ret;
 
-    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "lock init failed");
+    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");
 
     xSemaphoreTake(s_tf.lock, portMAX_DELAY);
     ret = tf_card_get_info_locked(out_info);
@@ -384,15 +383,15 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     int64_t t_start;
     int64_t t_end;
 
-    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "lock init failed");
+    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");
 
     xSemaphoreTake(s_tf.lock, portMAX_DELAY);
     ret = tf_card_get_info_locked(&info);
     xSemaphoreGive(s_tf.lock);
-    ESP_RETURN_ON_ERROR(ret, TAG, "TF card is not ready");
+    ESP_RETURN_ON_ERROR(ret, TAG, "TF 卡尚未就绪");
 
     if (info.free_bytes <= (2 * TF_CARD_SPEED_TEST_MIN_FILE_SIZE)) {
-        ESP_LOGW(TAG, "not enough free space for TF speed test");
+        ESP_LOGW(TAG, "TF 卡剩余空间不足，无法执行测速");
         return ESP_ERR_NO_MEM;
     }
 
@@ -402,7 +401,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
 
     test_size = (test_size / chunk_size) * chunk_size;
     if (test_size < TF_CARD_SPEED_TEST_MIN_FILE_SIZE) {
-        ESP_LOGW(TAG, "usable space for TF speed test is too small");
+        ESP_LOGW(TAG, "TF 卡可用于测速的空间过小");
         return ESP_ERR_NO_MEM;
     }
 
@@ -410,7 +409,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     if (!buf) {
         buf = heap_caps_malloc(chunk_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
-    ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "allocate speed test buffer failed");
+    ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "申请测速缓冲区失败");
 
     for (uint32_t i = 0; i < chunk_size; i++) {
         buf[i] = (uint8_t)(i & 0xFF);
@@ -421,7 +420,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     fp = fopen(TF_CARD_SPEED_TEST_FILE_NAME, "wb");
     if (!fp) {
         free(buf);
-        ESP_LOGE(TAG, "create TF speed test file failed");
+        ESP_LOGE(TAG, "创建 TF 测速文件失败");
         return ESP_FAIL;
     }
 
@@ -433,7 +432,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
             fclose(fp);
             unlink(TF_CARD_SPEED_TEST_FILE_NAME);
             free(buf);
-            ESP_LOGE(TAG, "write TF speed test file failed");
+            ESP_LOGE(TAG, "写入 TF 测速文件失败");
             return ESP_FAIL;
         }
         remaining -= (uint32_t)io_len;
@@ -449,7 +448,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     if (!fp) {
         unlink(TF_CARD_SPEED_TEST_FILE_NAME);
         free(buf);
-        ESP_LOGE(TAG, "open TF speed test file failed");
+        ESP_LOGE(TAG, "打开 TF 测速文件失败");
         return ESP_FAIL;
     }
 
@@ -461,7 +460,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
             fclose(fp);
             unlink(TF_CARD_SPEED_TEST_FILE_NAME);
             free(buf);
-            ESP_LOGE(TAG, "read TF speed test file failed");
+            ESP_LOGE(TAG, "读取 TF 测速文件失败");
             return ESP_FAIL;
         }
         remaining -= (uint32_t)io_len;
@@ -486,10 +485,10 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
         *out_result = result;
     }
 
-    ESP_LOGI(TAG, "TF speed test done | file: %u bytes | write: %u KB/s | read: %u KB/s",
+    ESP_LOGI(TAG, "TF 卡测速完成 | 文件: %u 字节 | 写入: %u KB/s | 读取: %u KB/s",
              result.file_size_bytes, result.write_speed_kbps, result.read_speed_kbps);
     if (result.write_speed_too_low || result.read_speed_too_low) {
-        ESP_LOGW(TAG, "TF speed below threshold | write threshold: %u KB/s | read threshold: %u KB/s",
+        ESP_LOGW(TAG, "TF 卡速度低于阈值 | 写入阈值: %u KB/s | 读取阈值: %u KB/s",
                  TF_CARD_MIN_WRITE_SPEED_KBPS, TF_CARD_MIN_READ_SPEED_KBPS);
     }
 
@@ -504,7 +503,7 @@ void tf_card_log_status(void)
 
     ret = tf_card_get_info(&info);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TF card is not mounted, skip status log");
+        ESP_LOGW(TAG, "TF 卡未挂载，跳过状态打印");
         return;
     }
 
@@ -512,15 +511,15 @@ void tf_card_log_status(void)
     speed = s_tf.last_speed_test;
     xSemaphoreGive(s_tf.lock);
 
-    ESP_LOGI(TAG, "TF status | name: %s | total: %" PRIu64 " MB | free: %" PRIu64 " MB",
-             info.card_name[0] ? info.card_name : "unknown",
+    ESP_LOGI(TAG, "TF 状态 | 名称: %s | 总容量: %" PRIu64 " MB | 剩余: %" PRIu64 " MB",
+             info.card_name[0] ? info.card_name : "未知",
              info.total_bytes / (1024ULL * 1024ULL),
              info.free_bytes / (1024ULL * 1024ULL));
-    ESP_LOGI(TAG, "TF params | sectors: %" PRIu64 " | sector_size: %" PRIu32 " | real_freq: %" PRIi32 " kHz",
+    ESP_LOGI(TAG, "TF 参数 | 扇区数: %" PRIu64 " | 扇区大小: %" PRIu32 " | 实际频率: %" PRIi32 " kHz",
              info.sector_count, info.sector_size, info.real_freq_khz);
 
     if (speed.valid) {
-        ESP_LOGI(TAG, "TF last speed | write: %u KB/s | read: %u KB/s | too_low(write/read)=%d/%d",
+        ESP_LOGI(TAG, "TF 最近测速 | 写入: %u KB/s | 读取: %u KB/s | 低于阈值(写/读)=%d/%d",
                  speed.write_speed_kbps, speed.read_speed_kbps,
                  speed.write_speed_too_low, speed.read_speed_too_low);
     }

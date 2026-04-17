@@ -5,7 +5,7 @@
  * 负责系统初始化与各模块启动，具体实现均在 User/ 目录下：
  *   - wifi_connect     : WiFi STA 连接（通过 ESP32-C5 SDIO 协处理器）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
- *   - camera           : OV5647 MIPI-CSI 采集 + JPEG 编码 + 推流
+ *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
  *
  * 访问方式：
@@ -51,7 +51,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
                                   int32_t id, void *data)
 {
     if (base == ESP_HOSTED_EVENT && id == ESP_HOSTED_EVENT_TRANSPORT_UP) {
-        ESP_LOGI(TAG, "SDIO transport UP");
+        ESP_LOGI(TAG, "SDIO 传输链路已就绪");
         xSemaphoreGive(s_hosted_up_sem);
     }
 }
@@ -126,15 +126,15 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
     err = wifi_connect_init();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi init failed: 0x%x", err);
+        ESP_LOGE(TAG, "WiFi 初始化失败: 0x%x", err);
         return;
     }
 
-    ESP_LOGI(TAG, "Waiting for WiFi IP...");
+    ESP_LOGI(TAG, "等待 WiFi 获取 IP...");
     while ((err = wifi_connect_wait_for_ip(WIFI_IP_WAIT_SLICE_MS)) != ESP_OK) {
         ESP_LOGW(TAG, "WiFi IP 未就绪，仍在等待重连完成...");
     }
-    ESP_LOGI(TAG, "WiFi IP is ready, starting services");
+    ESP_LOGI(TAG, "WiFi IP 已就绪，开始启动各项服务");
 #endif
 
     /* TF 卡基础驱动初始化。

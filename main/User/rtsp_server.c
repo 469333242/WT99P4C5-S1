@@ -7,8 +7,9 @@
  * 访问地址：rtsp://<设备IP>:8554/stream
  *
  * 架构：
- *   - rtsp_server_task : 接受连接 + RTSP 握手（core 1）
- *   - rtsp_send_task   : 每个客户端独立发送任务，从队列取帧发送（core 0）
+ *   - rtsp_server_task  : 仅负责 accept 新连接（core 1）
+ *   - rtsp_session_task : 每个客户端独立处理 RTSP 控制会话（core 1）
+ *   - rtsp_send_task    : 每个客户端独立发送任务，从队列取帧发送（core 0）
  *   - rtsp_push_h264_frame : 摄像头任务调用，复制帧到队列
  *
  * H.264 RTP 封装模式：
@@ -46,23 +47,26 @@ static rtsp_playing_cb_t s_playing_cb = NULL;
 #define RTP_MTU             1400        /* WiFi环境最佳MTU */
 #define RTSP_BUF_SIZE       1024
 #define RTSP_SERVER_TASK_STACK (12 * 1024)
+#define RTSP_SESSION_TASK_STACK (8 * 1024)
+#define RTSP_SERVER_TASK_CORE 1
+#define RTSP_SESSION_TASK_CORE 1
 #define RTSP_SEND_TASK_CORE 0
 #define RTP_HEADER_LEN      12
 #define RTCP_INTERLEAVE_HDR 4
-#define FRAME_QUEUE_LEN     2           /* Two-frame queue absorbs short jitter without adding much latency. */
-#define FRAME_POOL_SIZE     (FRAME_QUEUE_LEN + 1) /* 至少保留 1 个发送中缓冲 */
+#define FRAME_QUEUE_LEN     1           /* 只允许排队 1 帧，超过就丢旧帧，优先实时性 */
+#define FRAME_POOL_SIZE     (FRAME_QUEUE_LEN + 1) /* 1 个发送中缓冲 + 1 个排队缓冲 */
 #define MAX_FRAME_SIZE      (200*1024)  /* H.264 最大帧 200KB */
-#define SEND_TIMEOUT_MS     80          /* 首帧/IDR 允许更充足的发送窗口，避免黑屏 */
-#define RTSP_TCP_SNDBUF     (32 * 1024) /* 保持较小缓存，但不要小到压掉关键帧 */
+#define SEND_TIMEOUT_MS     30          /* 双客户端时更快识别拥塞，避免积压旧帧 */
+#define RTSP_TCP_SNDBUF     (12 * 1024) /* 进一步缩小内核发送缓存，限制累计时延 */
 #define RTSP_TCP_RCVBUF     (8 * 1024)
 #define KEEPALIVE_IDLE_SEC  10          /* TCP Keepalive空闲时间 */
 #define KEEPALIVE_INTERVAL_SEC 5        /* TCP Keepalive探测间隔 */
 #define KEEPALIVE_COUNT     3           /* TCP Keepalive探测次数 */
 #define MAX_SEND_ERRORS     10          /* 最大连续发送错误次数 */
-#define MAX_SEND_RETRIES    2           /* 保留少量重试，优先保证首帧出图 */
-#define SEND_RETRY_DELAY_MS 2           /* 发送失败后短暂让出 CPU */
+#define MAX_SEND_RETRIES    1           /* 最多补一次发送机会，优先低延迟 */
+#define SEND_RETRY_DELAY_MS 1           /* 发送失败后仅短暂让出 CPU */
 #define MAX_NALUS_PER_FRAME 16          /* 每帧最大NALU数量 */
-#define RTSP_TRY_LOCK_TICKS 0           /* Keep best-effort paths non-blocking across FreeRTOS tick-rate changes. */
+#define RTSP_TRY_LOCK_TICKS 0           /* 关键路径尽量不阻塞，拿不到锁就直接丢当前帧 */
 #define FRAME_POOL_INVALID_IDX UINT8_MAX
 
 /* H.264 NALU 类型 */
@@ -74,22 +78,13 @@ static rtsp_playing_cb_t s_playing_cb = NULL;
 
 /* FU-A 分片标志 */
 #define FU_A_TYPE           28
-#define FU_S_BIT            0x80        /* Start bit */
-#define FU_E_BIT            0x40        /* End bit */
+#define FU_S_BIT            0x80        /* 分片起始标志 */
+#define FU_E_BIT            0x40        /* 分片结束标志 */
 
-/* ------------------------------------------------------------------ */
-/* 帧缓冲                                                               */
-/* ------------------------------------------------------------------ */
-typedef struct {
-    uint8_t                *data;
-    size_t                  len;
-    esp_h264_frame_type_t   frame_type;
-} frame_buf_t;
-
-/* NALU信息（用于一次性解析，避免重复扫描）*/
+/* NALU 信息：一次解析后在发送阶段直接复用，避免重复扫描 */
 typedef struct {
     size_t offset;      /* NALU在帧中的偏移 */
-    size_t len;         /* NALU长度（包含header）*/
+    size_t len;         /* NALU长度（包含头字节）*/
     uint8_t type;       /* NALU类型 */
 } nalu_info_t;
 
@@ -110,6 +105,7 @@ typedef enum {
     CLIENT_IDLE = 0,
     CLIENT_CONNECTED,
     CLIENT_PLAYING,
+    CLIENT_CLOSING,
 } client_state_t;
 
 typedef struct {
@@ -127,12 +123,12 @@ typedef struct {
     size_t         pps_len;
     uint32_t       frames_sent;      /* 已发送帧数统计 */
     uint32_t       frames_dropped;   /* 丢帧统计 */
-    TickType_t     last_send_time;   /* 上次发送时间（用于检测阻塞）*/
+    TickType_t     last_send_time;   /* 最近一次发送完成时刻，便于后续排查 */
     uint32_t       send_errors;      /* 连续发送错误计数 */
     uint32_t       total_bytes_sent; /* 总发送字节数 */
     TickType_t     connect_time;     /* 连接建立时间 */
     TaskHandle_t   session_task;     /* 持有该会话的服务任务 */
-    bool           wait_for_idr;     /* Drop delta frames until the next IDR after loss or reconnect. */
+    bool           wait_for_idr;     /* 丢帧或重连后只接受下一帧 IDR，避免解码花屏 */
     uint8_t       *frame_pool[FRAME_POOL_SIZE];  /* 预分配帧缓冲池 */
     bool           pool_in_use[FRAME_POOL_SIZE]; /* 缓冲占用状态 */
 } rtsp_client_t;
@@ -140,6 +136,10 @@ typedef struct {
 static rtsp_client_t s_clients[MAX_CLIENTS];
 static SemaphoreHandle_t s_clients_mutex;
 static int s_playing_count = 0;
+static uint8_t *s_latest_sps;
+static size_t s_latest_sps_len;
+static uint8_t *s_latest_pps;
+static size_t s_latest_pps_len;
 
 typedef struct {
     uint32_t frames_sent;
@@ -246,6 +246,27 @@ static bool replace_cached_nalu_if_needed(uint8_t **dst, size_t *dst_len,
     *dst = new_buf;
     *dst_len = src_len;
     return true;
+}
+
+static void seed_client_codec_config_locked(rtsp_client_t *c)
+{
+    if (!c) {
+        return;
+    }
+
+    if (s_latest_sps && s_latest_sps_len > 0) {
+        if (!replace_cached_nalu_if_needed(&c->sps, &c->sps_len,
+                                           s_latest_sps, s_latest_sps_len)) {
+            ESP_LOGW(TAG, "复制最新 SPS 到客户端缓存失败");
+        }
+    }
+
+    if (s_latest_pps && s_latest_pps_len > 0) {
+        if (!replace_cached_nalu_if_needed(&c->pps, &c->pps_len,
+                                           s_latest_pps, s_latest_pps_len)) {
+            ESP_LOGW(TAG, "复制最新 PPS 到客户端缓存失败");
+        }
+    }
 }
 
 static uint8_t reserve_frame_slot_locked(rtsp_client_t *c)
@@ -444,12 +465,12 @@ static int send_rtp_packet(int fd, int channel, const uint8_t *rtp, size_t rtp_l
  */
 static int rtp_send_h264_nalu(rtsp_client_t *c, const uint8_t *nalu, size_t nalu_len, int marker)
 {
-    uint8_t pkt[RTP_HEADER_LEN + 2 + RTP_MTU];  /* RTP header + FU header + payload */
+    uint8_t pkt[RTP_HEADER_LEN + 2 + RTP_MTU];  /* RTP头 + FU头 + 负载 */
 
     if (nalu_len <= RTP_MTU) {
         /* 单 NALU 模式：NALU 小于 MTU，直接封装 */
         pkt[0]  = 0x80;                             /* V=2, P=0, X=0, CC=0 */
-        pkt[1]  = (uint8_t)(96 | (marker << 7));   /* PT=96 (H.264), M bit */
+        pkt[1]  = (uint8_t)(96 | (marker << 7));   /* PT=96(H.264)，最高位为 Marker */
         pkt[2]  = (uint8_t)(c->rtp_seq >> 8);
         pkt[3]  = (uint8_t)(c->rtp_seq & 0xFF);
         pkt[4]  = (uint8_t)(c->rtp_ts >> 24);
@@ -471,7 +492,7 @@ static int rtp_send_h264_nalu(rtsp_client_t *c, const uint8_t *nalu, size_t nalu
         uint8_t nalu_type = nalu_hdr & H264_NALU_TYPE_MASK;
         uint8_t fu_indicator = (nalu_hdr & 0xE0) | FU_A_TYPE;  /* F+NRI + Type=28 */
 
-        const uint8_t *payload = nalu + 1;  /* 跳过 NALU header */
+        const uint8_t *payload = nalu + 1;  /* 跳过 NALU 头字节 */
         size_t payload_len = nalu_len - 1;
         bool first = true;
 
@@ -479,7 +500,7 @@ static int rtp_send_h264_nalu(rtsp_client_t *c, const uint8_t *nalu, size_t nalu
             size_t chunk = (payload_len > RTP_MTU) ? RTP_MTU : payload_len;
             int pkt_marker = (payload_len <= RTP_MTU && marker) ? 1 : 0;
 
-            /* RTP header */
+            /* RTP 头 */
             pkt[0]  = 0x80;
             pkt[1]  = (uint8_t)(96 | (pkt_marker << 7));
             pkt[2]  = (uint8_t)(c->rtp_seq >> 8);
@@ -494,15 +515,15 @@ static int rtp_send_h264_nalu(rtsp_client_t *c, const uint8_t *nalu, size_t nalu
             pkt[11] = (uint8_t)(c->ssrc & 0xFF);
             c->rtp_seq++;
 
-            /* FU indicator + FU header */
+            /* FU 指示字节 + FU 头字节 */
             pkt[RTP_HEADER_LEN] = fu_indicator;
             pkt[RTP_HEADER_LEN + 1] = nalu_type;
             if (first) {
-                pkt[RTP_HEADER_LEN + 1] |= FU_S_BIT;  /* Start bit */
+                pkt[RTP_HEADER_LEN + 1] |= FU_S_BIT;  /* 起始分片 */
                 first = false;
             }
             if (payload_len <= RTP_MTU) {
-                pkt[RTP_HEADER_LEN + 1] |= FU_E_BIT;  /* End bit */
+                pkt[RTP_HEADER_LEN + 1] |= FU_E_BIT;  /* 结束分片 */
             }
 
             /* Payload */
@@ -552,13 +573,11 @@ static void rtsp_send_task(void *arg)
 {
     rtsp_client_t *c = (rtsp_client_t *)arg;
     frame_with_nalus_t frame;
-    TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
         /* 等待入队通知，零延迟唤醒；超时 20ms 用于检测连接状态 */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
         if (xQueueReceive(c->frame_queue, &frame, 0) == pdTRUE) {
-            TickType_t send_start = xTaskGetTickCount();
             int send_ret = rtp_send_h264_frame_fast(c, frame.data, frame.nalus,
                                                     frame.nalu_count, frame.pts);
 
@@ -573,7 +592,9 @@ static void rtsp_send_task(void *arg)
                 xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
                 mark_client_wait_for_idr_locked(c);
                 xSemaphoreGive(s_clients_mutex);
-                ESP_LOGW(TAG, "RTP 发送失败 fd=%d (连续错误: %"PRIu32")，丢弃此帧", c->fd, c->send_errors);
+                if (c->send_errors == 1) {
+                    ESP_LOGW(TAG, "客户端 fd=%d 发送拥塞，已主动丢弃旧帧以降低延迟", c->fd);
+                }
 
                 /* 只有连续错误超过阈值才退出 */
                 if (c->send_errors >= MAX_SEND_ERRORS) {
@@ -587,37 +608,10 @@ static void rtsp_send_task(void *arg)
 
             /* 发送成功，重置错误计数 */
             c->send_errors = 0;
-            if (c->frames_sent == 0) {
-                ESP_LOGI(TAG, "首帧发送成功 fd=%d | pts=%"PRIu32" | bytes=%zu | type=%d",
-                         c->fd, frame.pts, frame.len, (int)frame.frame_type);
-            }
             c->frames_sent++;
             c->total_bytes_sent += frame.len;
             c->last_send_time = xTaskGetTickCount();
             note_frame_sent_once(frame.pts, frame.len);
-
-            /* 检测发送阻塞（单帧发送超过100ms表示网络拥塞）*/
-            TickType_t send_duration = c->last_send_time - send_start;
-            if (send_duration > pdMS_TO_TICKS(100)) {
-                ESP_LOGW(TAG, "发送阻塞检测 fd=%d | 耗时: %"PRIu32" ms | 帧大小: %zu bytes",
-                         c->fd, send_duration * portTICK_PERIOD_MS, frame.len);
-            }
-
-            /* 每10秒输出统计 */
-            TickType_t now = xTaskGetTickCount();
-            if ((now - last_stats) >= pdMS_TO_TICKS(10000)) {
-                uint32_t elapsed_ms = (now - last_stats) * portTICK_PERIOD_MS;
-                float actual_bitrate = (float)c->total_bytes_sent * 8.0f / elapsed_ms;  /* kbps */
-                float drop_rate = (c->frames_dropped + c->frames_sent > 0) ?
-                                  (float)c->frames_dropped * 100.0f / (c->frames_dropped + c->frames_sent) : 0.0f;
-
-                //ESP_LOGI(TAG, "客户端 fd=%d 统计 | 已发送: %"PRIu32" 帧 | 丢帧: %"PRIu32" (%.1f%%) | 码率: %.0f kbps",
-                //         c->fd, c->frames_sent, c->frames_dropped, drop_rate, actual_bitrate);
-                c->frames_sent = 0;
-                c->frames_dropped = 0;
-                c->total_bytes_sent = 0;
-                last_stats = now;
-            }
         } else {
             /* 超时检查连接状态 */
             xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
@@ -692,17 +686,28 @@ void rtsp_push_h264_frame(const uint8_t *h264_buf, size_t h264_len,
 
         if (sps && pps) {
             if (xSemaphoreTake(s_clients_mutex, RTSP_TRY_LOCK_TICKS) == pdTRUE) {
+                if (!replace_cached_nalu_if_needed(&s_latest_sps, &s_latest_sps_len,
+                                                   sps, sps_len)) {
+                    ESP_LOGW(TAG, "更新全局 SPS 缓存失败");
+                }
+                if (!replace_cached_nalu_if_needed(&s_latest_pps, &s_latest_pps_len,
+                                                   pps, pps_len)) {
+                    ESP_LOGW(TAG, "更新全局 PPS 缓存失败");
+                }
+
                 for (int i = 0; i < MAX_CLIENTS; i++) {
-                    if (s_clients[i].state != CLIENT_PLAYING) continue;
+                    if (s_clients[i].state == CLIENT_IDLE || s_clients[i].state == CLIENT_CLOSING) {
+                        continue;
+                    }
 
                     /* SPS/PPS 一般不会频繁变化，只有内容变化时才重建缓存 */
                     if (!replace_cached_nalu_if_needed(&s_clients[i].sps, &s_clients[i].sps_len,
                                                        sps, sps_len)) {
-                        ESP_LOGW(TAG, "更新 SPS 缓存失败 client=%d", i);
+        ESP_LOGW(TAG, "更新客户端 %d 的 SPS 缓存失败", i);
                     }
                     if (!replace_cached_nalu_if_needed(&s_clients[i].pps, &s_clients[i].pps_len,
                                                        pps, pps_len)) {
-                        ESP_LOGW(TAG, "更新 PPS 缓存失败 client=%d", i);
+        ESP_LOGW(TAG, "更新客户端 %d 的 PPS 缓存失败", i);
                     }
                 }
                 xSemaphoreGive(s_clients_mutex);
@@ -904,18 +909,6 @@ static void base64_encode(const uint8_t *src, size_t len, char *dst, size_t dst_
     dst[j] = '\0';
 }
 
-static void log_rtsp_request(rtsp_client_t *c, const char *req)
-{
-    const char *line_end = strstr(req, "\r\n");
-    size_t line_len = line_end ? (size_t)(line_end - req) : strnlen(req, RTSP_BUF_SIZE);
-
-    if (line_len > 120) {
-        line_len = 120;
-    }
-
-    ESP_LOGI(TAG, "RTSP request fd=%d: %.*s", c->fd, (int)line_len, req);
-}
-
 static esp_err_t start_streaming(rtsp_client_t *c)
 {
     bool need_start_task = false;
@@ -946,7 +939,7 @@ static esp_err_t start_streaming(rtsp_client_t *c)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "RTSP PLAY started fd=%d ch=%d", c->fd, c->rtp_channel);
+    ESP_LOGI(TAG, "客户端 fd=%d 开始拉流，通道=%d", c->fd, c->rtp_channel);
     return ESP_OK;
 }
 
@@ -954,8 +947,6 @@ static bool process_rtsp_request(rtsp_client_t *c, const char *req, bool *sessio
 {
     int cseq = parse_cseq(req);
     char resp[1536];
-
-    log_rtsp_request(c, req);
 
     if (strncmp(req, "OPTIONS", 7) == 0) {
         snprintf(resp, sizeof(resp),
@@ -980,7 +971,7 @@ static bool process_rtsp_request(rtsp_client_t *c, const char *req, bool *sessio
             free(pps_b64);
             free(sprop);
             free(sdp);
-            ESP_LOGE(TAG, "No memory for DESCRIBE response");
+            ESP_LOGE(TAG, "构建 DESCRIBE 响应失败：内存不足");
             *session_done = true;
             return false;
         }
@@ -1031,7 +1022,7 @@ static bool process_rtsp_request(rtsp_client_t *c, const char *req, bool *sessio
 
     if (strncmp(req, "SETUP", 5) == 0) {
         if (!is_tcp_interleaved_request(req)) {
-            ESP_LOGW(TAG, "Unsupported SETUP transport on fd=%d, only RTP/AVP/TCP interleaved is supported", c->fd);
+            ESP_LOGW(TAG, "客户端 fd=%d 使用了不支持的 SETUP 传输方式，仅支持 RTP/AVP/TCP interleaved", c->fd);
             snprintf(resp, sizeof(resp),
                      "RTSP/1.0 461 Unsupported Transport\r\n"
                      "CSeq: %d\r\n\r\n",
@@ -1064,7 +1055,7 @@ static bool process_rtsp_request(rtsp_client_t *c, const char *req, bool *sessio
         send(c->fd, resp, strlen(resp), MSG_NOSIGNAL);
 
         if (start_streaming(c) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start RTSP send task for fd=%d", c->fd);
+            ESP_LOGE(TAG, "客户端 fd=%d 启动发送任务失败", c->fd);
             *session_done = true;
         }
         return true;
@@ -1078,7 +1069,7 @@ static bool process_rtsp_request(rtsp_client_t *c, const char *req, bool *sessio
         return true;
     }
 
-    ESP_LOGW(TAG, "Unsupported RTSP request fd=%d", c->fd);
+    ESP_LOGW(TAG, "客户端 fd=%d 发送了不支持的 RTSP 请求", c->fd);
     snprintf(resp, sizeof(resp),
              "RTSP/1.0 501 Not Implemented\r\n"
              "CSeq: %d\r\n\r\n",
@@ -1169,7 +1160,7 @@ static void __attribute__((unused)) handle_rtsp_session(rtsp_client_t *c)
 
             xTaskCreatePinnedToCore(rtsp_send_task, "rtsp_send",
                                     8 * 1024, c, 14, &c->send_task, RTSP_SEND_TASK_CORE);
-            ESP_LOGI(TAG, "客户端 fd=%d 开始播放 (ch=%d)", c->fd, c->rtp_channel);
+            ESP_LOGI(TAG, "客户端 fd=%d 开始播放，通道=%d", c->fd, c->rtp_channel);
 
             /* 等待客户端断开或 TEARDOWN */
             while (recv(c->fd, buf, sizeof(buf), 0) > 0) {
@@ -1247,10 +1238,82 @@ static void handle_rtsp_session_stream(rtsp_client_t *c)
         }
 
         if (used == sizeof(buf) - 1) {
-            ESP_LOGW(TAG, "RTSP request too large, closing fd=%d", c->fd);
+            ESP_LOGW(TAG, "客户端 fd=%d 的 RTSP 请求过长，主动断开连接", c->fd);
             break;
         }
     }
+}
+
+static void cleanup_client_session(rtsp_client_t *c, int slot)
+{
+    TaskHandle_t send_task = NULL;
+    int fd = -1;
+
+    xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+    if (c->state == CLIENT_PLAYING) {
+        update_playing_count(-1);
+    }
+    c->state = CLIENT_CLOSING;
+    fd = c->fd;
+    c->fd = -1;
+    send_task = c->send_task;
+    xSemaphoreGive(s_clients_mutex);
+
+    if (fd >= 0) {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+    }
+
+    if (send_task) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+
+    xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+    if (c->sps) {
+        free(c->sps);
+        c->sps = NULL;
+    }
+    if (c->pps) {
+        free(c->pps);
+        c->pps = NULL;
+    }
+
+    flush_client_queue_locked(c);
+    memset(c->pool_in_use, 0, sizeof(c->pool_in_use));
+    c->sps_len = 0;
+    c->pps_len = 0;
+    c->rtp_seq = 0;
+    c->rtp_ts = 0;
+    c->ssrc = 0;
+    c->rtp_channel = 0;
+    c->frames_sent = 0;
+    c->frames_dropped = 0;
+    c->last_send_time = 0;
+    c->send_errors = 0;
+    c->total_bytes_sent = 0;
+    c->connect_time = 0;
+    c->session_task = NULL;
+    c->send_task = NULL;
+    c->wait_for_idr = true;
+    c->state = CLIENT_IDLE;
+    xSemaphoreGive(s_clients_mutex);
+
+    ESP_LOGI(TAG, "客户端已断开，槽位=%d", slot);
+}
+
+static void rtsp_session_task(void *arg)
+{
+    rtsp_client_t *c = (rtsp_client_t *)arg;
+    int slot = (int)(c - s_clients);
+
+    xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+    c->session_task = xTaskGetCurrentTaskHandle();
+    xSemaphoreGive(s_clients_mutex);
+
+    ESP_LOGI(TAG, "客户端已连接，槽位=%d，fd=%d", slot, c->fd);
+    handle_rtsp_session_stream(c);
+    cleanup_client_session(c, slot);
+    vTaskDelete(NULL);
 }
 
 static void rtsp_server_task(void *arg)
@@ -1336,8 +1399,9 @@ static void rtsp_server_task(void *arg)
             s_clients[slot].send_errors = 0;
             s_clients[slot].total_bytes_sent = 0;
             s_clients[slot].connect_time = xTaskGetTickCount();
-            s_clients[slot].session_task = xTaskGetCurrentTaskHandle();
+            s_clients[slot].session_task = NULL;
             s_clients[slot].wait_for_idr = true;
+            seed_client_codec_config_locked(&s_clients[slot]);
         }
         xSemaphoreGive(s_clients_mutex);
 
@@ -1347,43 +1411,27 @@ static void rtsp_server_task(void *arg)
             continue;
         }
 
-        ESP_LOGI(TAG, "客户端已连接，slot=%d fd=%d", slot, cli_fd);
-        handle_rtsp_session_stream(&s_clients[slot]);
-
-        /* 会话结束，清理 */
-        xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
-        if (s_clients[slot].state == CLIENT_PLAYING) {
-            update_playing_count(-1);
+        BaseType_t ret = xTaskCreatePinnedToCore(rtsp_session_task, "rtsp_session",
+                                                 RTSP_SESSION_TASK_STACK, &s_clients[slot],
+                                                 6, NULL, RTSP_SESSION_TASK_CORE);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "创建 RTSP 会话任务失败，拒绝客户端 fd=%d", cli_fd);
+            xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
+            s_clients[slot].state = CLIENT_IDLE;
+            s_clients[slot].fd = -1;
+            if (s_clients[slot].sps) {
+                free(s_clients[slot].sps);
+                s_clients[slot].sps = NULL;
+            }
+            if (s_clients[slot].pps) {
+                free(s_clients[slot].pps);
+                s_clients[slot].pps = NULL;
+            }
+            s_clients[slot].sps_len = 0;
+            s_clients[slot].pps_len = 0;
+            xSemaphoreGive(s_clients_mutex);
+            close(cli_fd);
         }
-        s_clients[slot].state = CLIENT_IDLE;
-        close(s_clients[slot].fd);
-        s_clients[slot].fd = -1;
-
-        /* 释放 SPS/PPS 缓存 */
-        if (s_clients[slot].sps) {
-            free(s_clients[slot].sps);
-            s_clients[slot].sps = NULL;
-        }
-        if (s_clients[slot].pps) {
-            free(s_clients[slot].pps);
-            s_clients[slot].pps = NULL;
-        }
-
-        TaskHandle_t send_task = s_clients[slot].send_task;
-        xSemaphoreGive(s_clients_mutex);
-
-        /* 等待发送任务退出，避免复用旧缓冲 */
-        if (send_task) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
-        }
-
-        xSemaphoreTake(s_clients_mutex, portMAX_DELAY);
-        flush_client_queue_locked(&s_clients[slot]);
-        memset(s_clients[slot].pool_in_use, 0, sizeof(s_clients[slot].pool_in_use));
-        s_clients[slot].session_task = NULL;
-        xSemaphoreGive(s_clients_mutex);
-
-        ESP_LOGI(TAG, "客户端已断开，slot=%d", slot);
     }
 }
 
@@ -1413,7 +1461,7 @@ esp_err_t rtsp_server_start(void)
             s_clients[i].frame_pool[j] = heap_caps_malloc(MAX_FRAME_SIZE,
                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (!s_clients[i].frame_pool[j]) {
-                ESP_LOGE(TAG, "预分配帧缓冲池失败 client=%d buf=%d", i, j);
+                ESP_LOGE(TAG, "预分配帧缓冲池失败：客户端=%d，缓冲=%d", i, j);
                 return ESP_ERR_NO_MEM;
             }
         }
@@ -1425,6 +1473,6 @@ esp_err_t rtsp_server_start(void)
     rtsp_reset_tx_stats();
 
     BaseType_t ret = xTaskCreatePinnedToCore(
-        rtsp_server_task, "rtsp_srv", RTSP_SERVER_TASK_STACK, NULL, 5, NULL, 1);
+        rtsp_server_task, "rtsp_srv", RTSP_SERVER_TASK_STACK, NULL, 5, NULL, RTSP_SERVER_TASK_CORE);
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }

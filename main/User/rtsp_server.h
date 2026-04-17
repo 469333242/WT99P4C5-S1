@@ -52,9 +52,9 @@ void rtsp_push_h264_frame(const uint8_t *h264_buf, size_t h264_len,
 typedef void (*rtsp_playing_cb_t)(bool playing);
 
 typedef struct {
-    uint32_t frames_sent;     /* Unique H.264 frames successfully sent to at least one client */
-    uint32_t bytes_sent;      /* Bytes for the unique sent frames */
-    uint32_t active_clients;  /* Current PLAYING clients */
+    uint32_t frames_sent;     /* 去重后的已发送帧数：同一帧发给多个客户端只计一次 */
+    uint32_t bytes_sent;      /* 去重后的已发送字节数 */
+    uint32_t active_clients;  /* 当前处于 PLAYING 状态的客户端数量 */
 } rtsp_tx_stats_t;
 
 /**
@@ -69,15 +69,14 @@ typedef struct {
 void rtsp_set_playing_callback(rtsp_playing_cb_t cb);
 
 /**
- * @brief Copy and reset actual RTSP transmit statistics.
+ * @brief 读取并清零当前 RTSP 实际发送统计
  *
- * The frame counter is de-duplicated by frame timestamp, so multiple clients
- * receiving the same frame count as one actual source frame sent.
+ * 统计按帧时间戳去重，同一帧即使发给多个客户端，也只统计为 1 帧。
  */
 void rtsp_take_tx_stats(rtsp_tx_stats_t *stats);
 
 /**
- * @brief Reset the RTSP transmit statistics window.
+ * @brief 清零 RTSP 发送统计窗口
  */
 void rtsp_reset_tx_stats(void);
 

@@ -154,7 +154,7 @@ esp_err_t wifi_connect_init(void)
     /* 将宏展开的复合字面量拷贝到静态变量，确保生命周期 */
     s_profile = WIFI_ACTIVE_PROFILE;
 
-    ESP_LOGI(TAG, "当前Profile: SSID=[%s]  模式=%s",
+    ESP_LOGI(TAG, "当前网络配置: SSID=[%s]  模式=%s",
              s_profile.ssid,
              s_profile.use_static_ip ? "静态IP" : "DHCP");
 
@@ -162,7 +162,7 @@ esp_err_t wifi_connect_init(void)
                                      pdFALSE, NULL, reconnect_timer_cb);
     s_wifi_event_group = xEventGroupCreate();
     if (!s_wifi_event_group) {
-        ESP_LOGE(TAG, "WiFi event group create failed");
+        ESP_LOGE(TAG, "创建 WiFi 事件组失败");
         return ESP_ERR_NO_MEM;
     }
 

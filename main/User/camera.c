@@ -50,7 +50,7 @@ static const char *TAG = "camera";
 #define CAM_RESET_PIN       (-1)        /* 无复位引脚 */
 #define CAM_PWDN_PIN        (-1)        /* 无掉电引脚 */
 #define CAM_STALE_FLUSH_MAX CAM_BUF_COUNT /* 开播时最多丢弃当前队列中的陈旧帧 */
-#define CAM_STATS_REPORT_INTERVAL_US (10ULL * 1000 * 1000)
+#define CAM_STATS_REPORT_INTERVAL_US (10ULL * 1000 * 1000) /* 10秒调试统计输出周期 */
 
 /* H.264 编码参数
  * 快速切换：只修改 H264_PROFILE
@@ -68,16 +68,16 @@ static const char *TAG = "camera";
 #if H264_PROFILE == H264_PROFILE_1280X960
 #define H264_WIDTH          1280         /* 编码宽度 */
 #define H264_HEIGHT         960          /* 编码高度 */
-#define H264_FPS            45           /* 目标编码帧率 */
-#define H264_GOP            6            /* 约 200ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        3500000      /* 码率3.5Mbps */
+#define H264_FPS            45           /* 双客户端默认降到 30fps，降低链路堆积 */
+#define H264_GOP            30            /* 约 133ms 一个 IDR，丢帧后更快恢复 */
+#define H264_BITRATE        3500000      /* 码率 3.5Mbps，减轻双客户端带宽压力 */
 #define H264_QP_MIN         28           /* 最小QP */
 #define H264_QP_MAX         42           /* 最大QP */
 #elif H264_PROFILE == H264_PROFILE_1920X1080
 #define H264_WIDTH          1920         /* 编码宽度 */
 #define H264_HEIGHT         1080         /* 编码高度 */
 #define H264_FPS            30           /* 目标编码帧率 */
-#define H264_GOP            4            /* 约 200ms 一个 IDR，兼顾低延迟与编码吞吐 */
+#define H264_GOP            4            /* 约 133ms 一个 IDR，兼顾低延迟与编码吞吐 */
 #define H264_BITRATE        5000000      /* 码率5.0Mbps */
 #define H264_QP_MIN         30           /* 最小QP */
 #define H264_QP_MAX         44           /* 最大QP */
@@ -85,8 +85,8 @@ static const char *TAG = "camera";
 #define H264_WIDTH          800          /* 编码宽度 */
 #define H264_HEIGHT         800          /* 编码高度 */
 #define H264_FPS            50           /* 目标编码帧率 */
-#define H264_GOP            6            /* 约 200ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        3000000      /* 码率3.0Mbps */
+#define H264_GOP            6            /* 约 120ms 一个 IDR，兼顾低延迟与编码吞吐 */
+#define H264_BITRATE        2500000      /* 码率2.5Mbps */
 #define H264_QP_MIN         28           /* 最小QP */
 #define H264_QP_MAX         42           /* 最大QP */
 #elif H264_PROFILE == H264_PROFILE_800X640
@@ -97,7 +97,8 @@ static const char *TAG = "camera";
 #define H264_BITRATE        1800000      /* 码率1.8Mbps */
 #define H264_QP_MIN         26           /* 最小QP */
 #define H264_QP_MAX         40           /* 最大QP */
-#error "Unsupported H264_PROFILE"
+#else
+#error "不支持的 H264_PROFILE"
 #endif
 #define H264_OUT_BUF_FACTOR 3            /* 输出缓冲倍数 */
 #define H264_RTP_TS_STEP    (90000 / H264_FPS) /* RTP/H.264 共用 90kHz 时基 */
@@ -274,12 +275,11 @@ static void cam_task(void *arg)
 {
     struct v4l2_buffer v4l2_buf;
     uint32_t encoded_frame_cnt = 0;
-    int64_t report_start_us = esp_timer_get_time();
+    int64_t report_start_us = 0;
     uint64_t dqbuf_time_total_us = 0;
     uint64_t encode_time_total_us = 0;
     uint64_t push_time_total_us = 0;
     bool stats_window_active = false;
-    bool first_frame_logged = false;
 
     while (1) {
         /* 等待 RTSP 客户端连接后再采集 */
@@ -287,13 +287,12 @@ static void cam_task(void *arg)
                             pdFALSE, pdTRUE, portMAX_DELAY);
         if (!stats_window_active) {
             flush_stale_capture_buffers();
-            report_start_us = esp_timer_get_time();
+            rtsp_reset_tx_stats();
+            encoded_frame_cnt = 0;
             dqbuf_time_total_us = 0;
             encode_time_total_us = 0;
             push_time_total_us = 0;
-            encoded_frame_cnt = 0;
-            first_frame_logged = false;
-            rtsp_reset_tx_stats();
+            report_start_us = esp_timer_get_time();
             stats_window_active = true;
         }
 
@@ -332,20 +331,13 @@ static void cam_task(void *arg)
         }
 
         if (ret == ESP_OK && h264_len > 0) {
-            encoded_frame_cnt++;
-            if (!first_frame_logged) {
-                ESP_LOGI(TAG, "首帧编码完成 | 大小: %zu bytes | 类型: %d | pts: %"PRIu32,
-                         h264_len, (int)frame_type, frame_pts);
-                first_frame_logged = true;
-            }
-
             /* 推送到 RTSP 服务器 */
             int64_t t4 = esp_timer_get_time();
             rtsp_push_h264_frame(s_cam.h264_out_buf, h264_len, frame_type, frame_pts);
             int64_t t5 = esp_timer_get_time();
             push_time_total_us += (uint64_t)(t5 - t4);
+            encoded_frame_cnt++;
 
-            /* 每 10 秒输出一次性能统计 */
             int64_t now_us = esp_timer_get_time();
             if ((now_us - report_start_us) >= CAM_STATS_REPORT_INTERVAL_US) {
                 uint32_t elapsed_ms = (uint32_t)((now_us - report_start_us) / 1000);
@@ -358,26 +350,20 @@ static void cam_task(void *arg)
                 if (elapsed_ms > 0) {
                     encoded_fps = (float)encoded_frame_cnt * 1000.0f / elapsed_ms;
                     actual_fps = (float)tx_stats.frames_sent * 1000.0f / elapsed_ms;
-                    actual_bitrate = (float)tx_stats.bytes_sent * 8.0f / elapsed_ms;  /* kbps */
+                    actual_bitrate = (float)tx_stats.bytes_sent * 8.0f / elapsed_ms;
                 }
 
-                uint32_t unsent_frames = (encoded_frame_cnt > tx_stats.frames_sent) ?
-                                         (encoded_frame_cnt - tx_stats.frames_sent) : 0;
-
                 ESP_LOGI(TAG,
-                         "RTSP发送统计 | 分辨率: %"PRIu32"x%"PRIu32" | 编码目标: %d fps | 编码帧率: %.1f fps | 实际发送帧率: %.1f fps | 实际发送码率: %.0f kbps",
-                         s_cam.width, s_cam.height, H264_FPS, encoded_fps, actual_fps, actual_bitrate);
-                ESP_LOGI(TAG,
-                         "流统计明细 | 编码帧数: %"PRIu32" | 发送帧数: %"PRIu32" | 未发送帧: %"PRIu32" | 活跃客户端: %"PRIu32,
-                         encoded_frame_cnt, tx_stats.frames_sent, unsent_frames, tx_stats.active_clients);
+                         "视频统计 | 当前分辨率: %"PRIu32"x%"PRIu32" | 编码帧率: %.1f fps | 实际帧率: %.1f fps | 实际码率: %.0f kbps",
+                         s_cam.width, s_cam.height, encoded_fps, actual_fps, actual_bitrate);
 
-                /* 性能分析 */
                 if (encoded_frame_cnt > 0) {
                     float avg_dqbuf_ms = (float)dqbuf_time_total_us / (1000.0f * encoded_frame_cnt);
                     float avg_encode_ms = (float)encode_time_total_us / (1000.0f * encoded_frame_cnt);
                     float avg_push_ms = (float)push_time_total_us / (1000.0f * encoded_frame_cnt);
+
                     ESP_LOGI(TAG,
-                             "阶段耗时 | DQBUF: %.2f ms | 编码: %.2f ms | 推送: %.2f ms | 总计: %.2f ms",
+                             "阶段耗时 | 取帧: %.2f ms | 编码: %.2f ms | 推流: %.2f ms | 总计: %.2f ms",
                              avg_dqbuf_ms, avg_encode_ms, avg_push_ms,
                              avg_dqbuf_ms + avg_encode_ms + avg_push_ms);
                 }
