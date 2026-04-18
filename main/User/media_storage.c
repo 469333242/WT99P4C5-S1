@@ -894,7 +894,7 @@ static esp_err_t media_storage_write_file(const char *path, const uint8_t *data,
 
     if (fwrite(data, 1, len, fp) != len) {
         fclose(fp);
-        unlink(path);
+        remove(path);
         ESP_LOGE(TAG, "写入文件失败: %s, errno=%d", path, errno);
         return ESP_FAIL;
     }
@@ -1240,7 +1240,7 @@ static esp_err_t media_storage_video_open_segment(void)
     ret = media_mp4_writer_open(&s_media.video_writer, tmp_path, &writer_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "打开 MP4 分段失败: 0x%x (%s)", ret, esp_err_to_name(ret));
-        unlink(tmp_path);
+        remove(tmp_path);
         return ret;
     }
 
@@ -1250,7 +1250,7 @@ static esp_err_t media_storage_video_open_segment(void)
     }
     if (ret != ESP_OK) {
         media_mp4_writer_deinit(&s_media.video_writer);
-        unlink(tmp_path);
+        remove(tmp_path);
         media_storage_reset_video_segment_state();
         return ret;
     }
@@ -1272,7 +1272,7 @@ static void media_storage_video_abort_segment(void)
     }
 
     if (s_media.video_tmp_path[0] != '\0') {
-        unlink(s_media.video_tmp_path);
+        remove(s_media.video_tmp_path);
     }
 
     ESP_LOGW(TAG, "录像分段已丢弃 | 序号=%04" PRIu32, s_media.video_segment_index);
@@ -1297,7 +1297,7 @@ static esp_err_t media_storage_video_close_segment(void)
 
     ret = media_mp4_writer_close(&s_media.video_writer);
     if (ret != ESP_OK || frame_count == 0U) {
-        unlink(tmp_path);
+        remove(tmp_path);
         media_storage_reset_video_segment_state();
 
         if (ret == ESP_OK && frame_count == 0U) {
@@ -1310,7 +1310,7 @@ static esp_err_t media_storage_video_close_segment(void)
     }
 
     if (rename(tmp_path, final_path) != 0) {
-        unlink(tmp_path);
+        remove(tmp_path);
         media_storage_reset_video_segment_state();
         ESP_LOGE(TAG, "MP4 临时文件改名失败 | %s -> %s | errno=%d",
                  tmp_path, final_path, errno);

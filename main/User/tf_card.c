@@ -415,7 +415,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
         buf[i] = (uint8_t)(i & 0xFF);
     }
 
-    unlink(TF_CARD_SPEED_TEST_FILE_NAME);
+    remove(TF_CARD_SPEED_TEST_FILE_NAME);
 
     fp = fopen(TF_CARD_SPEED_TEST_FILE_NAME, "wb");
     if (!fp) {
@@ -430,7 +430,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
         io_len = (remaining > chunk_size) ? chunk_size : remaining;
         if (fwrite(buf, 1, io_len, fp) != io_len) {
             fclose(fp);
-            unlink(TF_CARD_SPEED_TEST_FILE_NAME);
+            remove(TF_CARD_SPEED_TEST_FILE_NAME);
             free(buf);
             ESP_LOGE(TAG, "写入 TF 测速文件失败");
             return ESP_FAIL;
@@ -446,7 +446,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     fclose(fp);
     fp = fopen(TF_CARD_SPEED_TEST_FILE_NAME, "rb");
     if (!fp) {
-        unlink(TF_CARD_SPEED_TEST_FILE_NAME);
+        remove(TF_CARD_SPEED_TEST_FILE_NAME);
         free(buf);
         ESP_LOGE(TAG, "打开 TF 测速文件失败");
         return ESP_FAIL;
@@ -458,7 +458,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
         io_len = (remaining > chunk_size) ? chunk_size : remaining;
         if (fread(buf, 1, io_len, fp) != io_len) {
             fclose(fp);
-            unlink(TF_CARD_SPEED_TEST_FILE_NAME);
+            remove(TF_CARD_SPEED_TEST_FILE_NAME);
             free(buf);
             ESP_LOGE(TAG, "读取 TF 测速文件失败");
             return ESP_FAIL;
@@ -469,7 +469,7 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
     result.read_speed_kbps = bytes_per_sec_to_kbps(test_size, t_end - t_start);
 
     fclose(fp);
-    unlink(TF_CARD_SPEED_TEST_FILE_NAME);
+    remove(TF_CARD_SPEED_TEST_FILE_NAME);
     free(buf);
 
     result.valid = true;
