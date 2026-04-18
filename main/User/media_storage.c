@@ -64,6 +64,7 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_MAX_PATH_LEN       192
 #define MEDIA_STORAGE_DATE_TAG_LEN       9
 #define MEDIA_STORAGE_TIMESTAMP_LEN      32
+#define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
 
 /* ------------------------------------------------------------------ */
 /* 内部状态                                                            */
@@ -73,6 +74,7 @@ typedef struct {
     bool                  session_ready;
     bool                  auto_photo_pending;
     bool                  photo_job_busy;
+    uint32_t              auto_photo_skip_frames;
 
     TaskHandle_t          task_handle;
     ppa_client_handle_t   ppa_client;
@@ -240,9 +242,14 @@ static bool media_storage_try_take_photo_request(void)
 
     portENTER_CRITICAL(&s_media_lock);
     if (s_media.initialized && s_media.auto_photo_pending && !s_media.photo_job_busy) {
-        s_media.auto_photo_pending = false;
-        s_media.photo_job_busy = true;
-        accepted = true;
+        /* RTSP 刚恢复时先跳过前几帧，避开陈旧帧和 ISP 自动调节尚未稳定的瞬间。 */
+        if (s_media.auto_photo_skip_frames > 0) {
+            s_media.auto_photo_skip_frames--;
+        } else {
+            s_media.auto_photo_pending = false;
+            s_media.photo_job_busy = true;
+            accepted = true;
+        }
     }
     portEXIT_CRITICAL(&s_media_lock);
     return accepted;
@@ -794,6 +801,7 @@ void media_storage_request_auto_photo(void)
 
     portENTER_CRITICAL(&s_media_lock);
     s_media.auto_photo_pending = true;
+    s_media.auto_photo_skip_frames = MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES;
     portEXIT_CRITICAL(&s_media_lock);
     ret = media_storage_ensure_photo_task();
     if (ret != ESP_OK) {
