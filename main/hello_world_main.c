@@ -38,6 +38,7 @@
 #define USE_ETHERNET    0
 #define HOSTED_WIFI_READY_DELAY_MS 6000
 #define WIFI_IP_WAIT_SLICE_MS      15000
+#define WIFI_TIME_WAIT_MS          8000
 
 
 static const char *TAG = "main";
@@ -140,6 +141,11 @@ void app_main(void)
         ESP_LOGW(TAG, "WiFi IP 未就绪，仍在等待重连完成...");
     }
     ESP_LOGI(TAG, "WiFi IP 已就绪，开始启动各项服务");
+
+    err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "网络校时未完成，若保存路径仍为默认时间，请先打开媒体网页同步电脑时间");
+    }
 #endif
 
     /* TF 卡基础驱动初始化。
@@ -156,12 +162,12 @@ void app_main(void)
         ESP_LOGW(TAG, "媒体存储模块初始化失败: 0x%x", err);
     }
 
-    /* 启动 SD 卡照片网页浏览服务（HTTP 80 端口） */
+    /* 启动 SD 卡媒体网页浏览服务（HTTP 80 端口） */
     err = photo_web_server_start();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "照片网页服务启动失败: 0x%x", err);
+        ESP_LOGW(TAG, "媒体网页服务启动失败: 0x%x", err);
     } else {
-        ESP_LOGI(TAG, "照片网页服务已启动，访问地址: http://<IP>/");
+        ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<IP>/");
     }
 
     /* 5. 启动 RTSP 服务器（端口 8554） */
@@ -174,10 +180,10 @@ void app_main(void)
 
     /* 6. 启动 UART0 TCP 透传服务（端口 8880） */
     /*    启动 UART1 TCP 透传服务（端口 8881） */
-    err = tcp_uart0_server_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "UART0 透传服务启动失败: 0x%x", err);
-    }
+    //err = tcp_uart0_server_start();
+    //if (err != ESP_OK) {
+    //    ESP_LOGE(TAG, "UART0 透传服务启动失败: 0x%x", err);
+    //}
     //err = tcp_uart1_server_start();
     //if (err != ESP_OK) {
     //    ESP_LOGE(TAG, "UART1 透传服务启动失败: 0x%x", err);

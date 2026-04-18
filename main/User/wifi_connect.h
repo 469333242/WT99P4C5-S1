@@ -90,3 +90,14 @@ esp_err_t wifi_connect_init(void);
  * @return ESP_OK 已拿到 IP，ESP_ERR_TIMEOUT 等待超时
  */
 esp_err_t wifi_connect_wait_for_ip(int timeout_ms);
+
+/**
+ * @brief 等待 SNTP 同步系统时间
+ *
+ * WiFi 获取 IP 后会自动启动 SNTP。该函数用于主流程短暂等待实时时间，
+ * 避免 RTSP 刚开始保存媒体时仍使用默认时间。
+ *
+ * @param timeout_ms 等待超时，单位毫秒；传负数表示一直等待
+ * @return ESP_OK 时间已同步或当前时间已有效，ESP_ERR_TIMEOUT 等待超时
+ */
+esp_err_t wifi_connect_wait_for_time(int timeout_ms);

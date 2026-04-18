@@ -170,10 +170,12 @@ static void on_rtsp_playing(bool playing)
         ESP_LOGI(TAG, "客户端已连接，启动摄像头采集");
         rtsp_reset_tx_stats();
         media_storage_request_auto_photo();
+        media_storage_start_video_record();
         xEventGroupSetBits(s_cam_event, CAM_START_BIT);
     } else {
         ESP_LOGI(TAG, "客户端已断开，暂停摄像头采集");
         rtsp_reset_tx_stats();
+        media_storage_stop_video_record();
         xEventGroupClearBits(s_cam_event, CAM_START_BIT);
     }
 }
@@ -340,6 +342,7 @@ static void cam_task(void *arg)
             rtsp_push_h264_frame(s_cam.h264_out_buf, h264_len, frame_type, frame_pts);
             int64_t t5 = esp_timer_get_time();
             push_time_total_us += (uint64_t)(t5 - t4);
+            media_storage_process_h264_frame(s_cam.h264_out_buf, h264_len, frame_type, frame_pts);
             encoded_frame_cnt++;
 
             int64_t now_us = esp_timer_get_time();
@@ -493,6 +496,11 @@ esp_err_t camera_init(void)
     }
 
     /* 4. 申请 MMAP 缓冲 */
+    media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG, "video record prepare failed, RTSP keeps running: 0x%x", media_ret);
+    }
+
     struct v4l2_requestbuffers req = {
         .count  = CAM_BUF_COUNT,
         .type   = V4L2_BUF_TYPE_VIDEO_CAPTURE,

@@ -6,7 +6,10 @@
  * 支持多环境 Profile：静态IP 或 DHCP，由 wifi_connect.h 中的宏选择。
  */
 
+#include <inttypes.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -14,6 +17,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_log.h"
 #include "wifi_connect.h"
 
@@ -25,8 +29,11 @@ static wifi_profile_t s_profile;
 static TimerHandle_t  s_reconnect_timer;
 static esp_netif_t   *s_sta_netif;
 static EventGroupHandle_t s_wifi_event_group;
+static bool s_sntp_started;
 
 #define WIFI_GOT_IP_BIT BIT0
+#define WIFI_SNTP_SERVER "ntp.aliyun.com"
+#define WIFI_VALID_UNIX_SEC 1704067200LL  /* 2024-01-01 00:00:00 UTC */
 
 /* ------------------------------------------------------------------ */
 /* 静态IP辅助函数                                                        */
@@ -56,8 +63,49 @@ static esp_err_t apply_static_ip(esp_netif_t *netif, const wifi_profile_t *p)
         return ret;
     }
 
+    /* 静态 IP 不会从 DHCP 获取 DNS，这里使用网关作为 DNS，便于后续 SNTP 域名解析。 */
+    esp_netif_dns_info_t dns_info = {0};
+    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+    dns_info.ip.u_addr.ip4.addr = esp_ip4addr_aton(p->gw);
+    ret = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "设置静态 DNS 失败: 0x%x", ret);
+    }
+
     ESP_LOGI(TAG, "静态IP已配置 → IP:%s  GW:%s  MASK:%s", p->ip, p->gw, p->mask);
     return ESP_OK;
+}
+
+static void wifi_sntp_sync_cb(struct timeval *tv)
+{
+    if (!tv || tv->tv_sec < WIFI_VALID_UNIX_SEC) {
+        ESP_LOGW(TAG, "SNTP 返回时间无效");
+        return;
+    }
+
+    ESP_LOGI(TAG, "SNTP 时间同步完成，unix=%" PRId64, (int64_t)tv->tv_sec);
+}
+
+static void wifi_start_sntp_once(void)
+{
+    esp_err_t ret;
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(WIFI_SNTP_SERVER);
+
+    if (s_sntp_started) {
+        return;
+    }
+
+    config.sync_cb = wifi_sntp_sync_cb;
+    ret = esp_netif_sntp_init(&config);
+    if (ret == ESP_OK) {
+        s_sntp_started = true;
+        ESP_LOGI(TAG, "SNTP 校时已启动，服务器: %s", WIFI_SNTP_SERVER);
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+        s_sntp_started = true;
+        ESP_LOGW(TAG, "SNTP 已由其他模块启动");
+    } else {
+        ESP_LOGW(TAG, "启动 SNTP 校时失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+    }
 }
 
 esp_err_t wifi_connect_wait_for_ip(int timeout_ms)
@@ -71,6 +119,36 @@ esp_err_t wifi_connect_wait_for_ip(int timeout_ms)
                                            pdFALSE, pdTRUE, ticks);
 
     return (bits & WIFI_GOT_IP_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t wifi_connect_wait_for_time(int timeout_ms)
+{
+    struct timeval tv = {0};
+    TickType_t ticks;
+    esp_err_t ret;
+
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec >= WIFI_VALID_UNIX_SEC) {
+        return ESP_OK;
+    }
+
+    if (!s_sntp_started) {
+        ESP_LOGW(TAG, "SNTP 尚未启动，无法等待网络校时");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ticks = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    ret = esp_netif_sntp_sync_wait(ticks);
+    if (ret == ESP_OK) {
+        gettimeofday(&tv, NULL);
+        if (tv.tv_sec >= WIFI_VALID_UNIX_SEC) {
+            ESP_LOGI(TAG, "系统时间已通过 SNTP 校准");
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "等待 SNTP 校时超时，请打开媒体网页用电脑时间同步");
+    return ESP_ERR_TIMEOUT;
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,6 +191,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                      IP2STR(&event->ip_info.ip));
         }
         ESP_LOGI(TAG, "======================================");
+        wifi_start_sntp_once();
         xEventGroupSetBits(s_wifi_event_group, WIFI_GOT_IP_BIT);
 
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
