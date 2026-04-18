@@ -57,13 +57,13 @@ static rtsp_playing_cb_t s_playing_cb = NULL;
 #define FRAME_POOL_SIZE     (FRAME_QUEUE_LEN + 1) /* 1 个发送中缓冲 + 1 个排队缓冲 */
 #define MAX_FRAME_SIZE      (200*1024)  /* H.264 最大帧 200KB */
 #define SEND_TIMEOUT_MS     30          /* 双客户端时更快识别拥塞，避免积压旧帧 */
-#define RTSP_TCP_SNDBUF     (12 * 1024) /* 进一步缩小内核发送缓存，限制累计时延 */
+#define RTSP_TCP_SNDBUF     (24 * 1024) /* 进一步缩小内核发送缓存，限制累计时延 */
 #define RTSP_TCP_RCVBUF     (8 * 1024)
 #define KEEPALIVE_IDLE_SEC  10          /* TCP Keepalive空闲时间 */
 #define KEEPALIVE_INTERVAL_SEC 5        /* TCP Keepalive探测间隔 */
 #define KEEPALIVE_COUNT     3           /* TCP Keepalive探测次数 */
 #define MAX_SEND_ERRORS     10          /* 最大连续发送错误次数 */
-#define MAX_SEND_RETRIES    1           /* 最多补一次发送机会，优先低延迟 */
+#define MAX_SEND_RETRIES    2           /* 最多补一次发送机会，优先低延迟 */
 #define SEND_RETRY_DELAY_MS 1           /* 发送失败后仅短暂让出 CPU */
 #define MAX_NALUS_PER_FRAME 16          /* 每帧最大NALU数量 */
 #define RTSP_TRY_LOCK_TICKS 0           /* 关键路径尽量不阻塞，拿不到锁就直接丢当前帧 */

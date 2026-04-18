@@ -4,6 +4,7 @@
  *
  * 负责系统初始化与各模块启动，具体实现均在 User/ 目录下：
  *   - wifi_connect     : WiFi STA 连接（通过 ESP32-C5 SDIO 协处理器）
+ *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
@@ -28,6 +29,8 @@
 #include "eth_connect.h" 
 #include "rtsp_server.h"
 #include "camera.h"
+#include "media_storage.h"
+#include "photo_web_server.h"
 #include "tcp_uart_server.h"
 #include "tf_card.h"
 
@@ -67,10 +70,12 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   2. esp_netif + 事件循环
  *   3. ESP-Hosted → 等待与 C5 建立 SDIO 链路
  *   4. WiFi 连接
- *   5. RTSP 服务器启动
- *   6. UART TCP 透传服务启动
- *   7. 以太网初始化并启动 ETH TCP 透传服务
- *   8. 摄像头初始化并开始采集推流
+ *   5. TF 卡初始化
+ *   6. 媒体存储模块初始化
+ *   7. RTSP 服务器启动
+ *   8. UART TCP 透传服务启动
+ *   9. 以太网初始化并启动 ETH TCP 透传服务
+ *   10. 摄像头初始化并开始采集推流
  */
 void app_main(void)
 {
@@ -142,6 +147,21 @@ void app_main(void)
     err = tf_card_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "TF 卡初始化失败: 0x%x", err);
+    }
+
+    /* 媒体存储模块初始化。
+     * 当前先启用自动照片存储能力；若 TF 卡未就绪，仅记录日志，不影响 RTSP 功能。 */
+    err = media_storage_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "媒体存储模块初始化失败: 0x%x", err);
+    }
+
+    /* 启动 SD 卡照片网页浏览服务（HTTP 80 端口） */
+    err = photo_web_server_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "照片网页服务启动失败: 0x%x", err);
+    } else {
+        ESP_LOGI(TAG, "照片网页服务已启动，访问地址: http://<IP>/");
     }
 
     /* 5. 启动 RTSP 服务器（端口 8554） */

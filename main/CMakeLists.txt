@@ -1,6 +1,8 @@
 idf_component_register(SRCS "hello_world_main.c"
                              "User/wifi_connect.c"
                              "User/camera.c"
+                             "User/media_storage.c"
+                             "User/photo_web_server.c"
                              "User/rtsp_server.c"
                              "User/tcp_uart_server.c"
                              "User/eth_connect.c"
@@ -14,7 +16,9 @@ idf_component_register(SRCS "hello_world_main.c"
                            esp_wifi_remote
                            esp_hosted
                            esp_video
+                           esp_http_server
                            esp_driver_jpeg
+                           esp_driver_ppa
                            esp_driver_uart
                            esp_driver_sdmmc
                            esp_h264

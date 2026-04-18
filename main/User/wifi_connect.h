@@ -68,7 +68,7 @@ typedef struct {
 /*    WIFI_PROFILE_WIN_HOTSPOT  → 公司Windows 移动热点（固定 .200）         */
 /*    WIFI_PROFILE_OTHER        → 其他热点（DHCP，串口日志查IP）          */
 /* ================================================================== */
-#define WIFI_ACTIVE_PROFILE   WIFI_PROFILE_OTHER2
+#define WIFI_ACTIVE_PROFILE   WIFI_PROFILE_OTHER1
 
 /* ================================================================== */
 /*  接口声明                                                            */

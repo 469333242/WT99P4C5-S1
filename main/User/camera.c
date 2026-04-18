@@ -35,6 +35,7 @@
 #include "esp_video_ioctl.h"
 #include "esp_h264_enc_single_hw.h"
 #include "camera.h"
+#include "media_storage.h"
 #include "rtsp_server.h"
 
 static const char *TAG = "camera";
@@ -69,8 +70,8 @@ static const char *TAG = "camera";
 #define H264_WIDTH          1280         /* 编码宽度 */
 #define H264_HEIGHT         960          /* 编码高度 */
 #define H264_FPS            45           /* 双客户端默认降到 30fps，降低链路堆积 */
-#define H264_GOP            30            /* 约 133ms 一个 IDR，丢帧后更快恢复 */
-#define H264_BITRATE        3500000      /* 码率 3.5Mbps，减轻双客户端带宽压力 */
+#define H264_GOP            4            /* 约 133ms 一个 IDR，丢帧后更快恢复 */
+#define H264_BITRATE        3500000      /* 平均码率，静止时略低于，运动时略高于 */
 #define H264_QP_MIN         28           /* 最小QP */
 #define H264_QP_MAX         42           /* 最大QP */
 #elif H264_PROFILE == H264_PROFILE_1920X1080
@@ -86,7 +87,7 @@ static const char *TAG = "camera";
 #define H264_HEIGHT         800          /* 编码高度 */
 #define H264_FPS            50           /* 目标编码帧率 */
 #define H264_GOP            6            /* 约 120ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        2500000      /* 码率2.5Mbps */
+#define H264_BITRATE        3000000      /* 码率3.0Mbps */
 #define H264_QP_MIN         28           /* 最小QP */
 #define H264_QP_MAX         42           /* 最大QP */
 #elif H264_PROFILE == H264_PROFILE_800X640
@@ -168,6 +169,7 @@ static void on_rtsp_playing(bool playing)
     if (playing) {
         ESP_LOGI(TAG, "客户端已连接，启动摄像头采集");
         rtsp_reset_tx_stats();
+        media_storage_request_auto_photo();
         xEventGroupSetBits(s_cam_event, CAM_START_BIT);
     } else {
         ESP_LOGI(TAG, "客户端已断开，暂停摄像头采集");
@@ -324,6 +326,8 @@ static void cam_task(void *arg)
                                         &h264_len, &frame_type, &frame_pts);
         int64_t t3 = esp_timer_get_time();
         encode_time_total_us += (uint64_t)(t3 - t2);
+        media_storage_process_camera_frame(s_cam.buf[v4l2_buf.index], v4l2_buf.bytesused,
+                                           s_cam.width, s_cam.height);
 
         /* 编码完成后立即归还采集缓冲，避免 CSI/ISP 因缓冲不足降帧 */
         if (ioctl(s_cam.fd, VIDIOC_QBUF, &v4l2_buf) != 0) {
@@ -481,6 +485,12 @@ esp_err_t camera_init(void)
     ESP_LOGI(TAG, "使用格式: %"PRIu32"x%"PRIu32" YUV420（硬件ISP转换）",
              s_cam.width, s_cam.height);
     log_sensor_format("当前传感器模式");
+
+    /* 预分配照片旁路缓冲，避免 RTSP 开始推流后首次拍照再申请大块内存。 */
+    esp_err_t media_ret = media_storage_prepare_photo_buffers(s_cam.width, s_cam.height);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG, "照片缓冲预分配失败，自动拍照将跳过或延后: 0x%x", media_ret);
+    }
 
     /* 4. 申请 MMAP 缓冲 */
     struct v4l2_requestbuffers req = {
