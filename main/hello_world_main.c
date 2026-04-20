@@ -97,8 +97,8 @@ void app_main(void)
 
     /* 以太网配置：true=静态IP, false=DHCP */
     bool use_static_ip = true;
-    const char *eth_ip = "192.168.1.100";
-    const char *eth_gw = "192.168.1.1";
+    const char *eth_ip = "192.168.0.36";
+    const char *eth_gw = "192.168.0.1";
     const char *eth_mask = "255.255.255.0";
 
     err = eth_connect_init(use_static_ip, eth_ip, eth_gw, eth_mask);

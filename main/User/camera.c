@@ -73,7 +73,7 @@ static const char *TAG = "camera";
 #define H264_GOP            4            /* 约 133ms 一个 IDR，丢帧后更快恢复 */
 #define H264_BITRATE        3500000      /* 平均码率，静止时略低于，运动时略高于 */
 #define H264_QP_MIN         28           /* 最小QP */
-#define H264_QP_MAX         42           /* 最大QP */
+#define H264_QP_MAX         34           /* 最大QP */
 #elif H264_PROFILE == H264_PROFILE_1920X1080
 #define H264_WIDTH          1920         /* 编码宽度 */
 #define H264_HEIGHT         1080         /* 编码高度 */

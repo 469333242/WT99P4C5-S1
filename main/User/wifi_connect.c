@@ -248,7 +248,7 @@ esp_err_t wifi_connect_init(void)
     /* 创建默认 STA 网络接口 */
     s_sta_netif = esp_netif_create_default_wifi_sta();
 
-    /* ★ 静态IP：在 esp_wifi_start() 前配置，防止DHCP覆盖 */
+    /* 静态IP：在 esp_wifi_start() 前配置，防止DHCP覆盖 */
     if (s_profile.use_static_ip) {
         ESP_ERROR_CHECK(apply_static_ip(s_sta_netif, &s_profile));
     }

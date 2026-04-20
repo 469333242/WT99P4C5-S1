@@ -69,15 +69,20 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_DATE_TAG_LEN            9
 #define MEDIA_STORAGE_TIMESTAMP_LEN           32
 #define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
-#define MEDIA_STORAGE_VIDEO_QUEUE_LEN         16
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN         24
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
 #define MEDIA_STORAGE_VIDEO_SEGMENT_SEC       120U
 #define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
 #define MEDIA_STORAGE_VIDEO_TIMESCALE         90000U
 #define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE    (256U * 1024U)
 #define MEDIA_STORAGE_VIDEO_DROP_LOG_MS       1000
-#define MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL 5U
-#define MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES 8U
+#define MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL 2U
+#define MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX 4U
+#define MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS   2U
+#define MEDIA_STORAGE_VIDEO_RECOVERY_GOPS        3U
+#define MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 3U) / 4U)
+#define MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK  ((MEDIA_STORAGE_VIDEO_QUEUE_LEN + 3U) / 4U)
+#define MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES 24U
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_MASK    0x1F
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_SPS     7
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_PPS     8
@@ -155,6 +160,9 @@ typedef struct {
     char                  video_final_path[MEDIA_STORAGE_MAX_PATH_LEN];
     uint32_t              video_drop_count;
     uint32_t              video_save_gop_count;
+    uint32_t              video_adaptive_save_interval;
+    uint32_t              video_pressure_skip_gops;
+    uint32_t              video_recovery_gop_count;
     TickType_t            video_last_drop_log_tick;
 } media_storage_ctx_t;
 
@@ -396,23 +404,98 @@ static bool media_storage_is_video_record_requested(void)
     return requested;
 }
 
+static uint32_t media_storage_base_save_interval(void)
+{
+    return (MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL == 0U) ? 1U
+                                                         : MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL;
+}
+
+static uint32_t media_storage_count_video_slots_in_use_locked(void)
+{
+    uint32_t used_slots = 0;
+
+    for (int i = 0; i < MEDIA_STORAGE_VIDEO_QUEUE_LEN; i++) {
+        if (s_media.video_slot_in_use[i]) {
+            used_slots++;
+        }
+    }
+
+    return used_slots;
+}
+
+static void media_storage_log_video_pressure(uint32_t used_slots,
+                                             uint32_t save_interval,
+                                             uint32_t skip_gops)
+{
+    static TickType_t s_last_pressure_log_tick = 0;
+    TickType_t now = xTaskGetTickCount();
+
+    if (s_last_pressure_log_tick != 0 &&
+        (now - s_last_pressure_log_tick) < pdMS_TO_TICKS(MEDIA_STORAGE_VIDEO_DROP_LOG_MS)) {
+        return;
+    }
+
+    s_last_pressure_log_tick = now;
+    ESP_LOGW(TAG,
+             "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP",
+             used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops);
+}
+
 static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_type)
 {
     bool skip;
-    uint32_t save_interval = MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL;
-
-    if (save_interval == 0U) {
-        save_interval = 1U;
-    }
+    uint32_t used_slots = 0;
+    uint32_t save_interval = 0;
+    uint32_t skip_gops = 0;
+    bool log_pressure = false;
+    const uint32_t base_interval = media_storage_base_save_interval();
 
     portENTER_CRITICAL(&s_media_lock);
+    if (s_media.video_adaptive_save_interval < base_interval) {
+        s_media.video_adaptive_save_interval = base_interval;
+    }
     if (frame_type == ESP_H264_FRAME_TYPE_IDR) {
+        used_slots = media_storage_count_video_slots_in_use_locked();
+        if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK) {
+            if (s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
+                s_media.video_adaptive_save_interval++;
+            }
+            if (s_media.video_pressure_skip_gops < 1U) {
+                s_media.video_pressure_skip_gops = 1U;
+            }
+            s_media.video_recovery_gop_count = 0;
+            log_pressure = true;
+        } else if (used_slots <= MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK) {
+            if (s_media.video_adaptive_save_interval > base_interval) {
+                s_media.video_recovery_gop_count++;
+                if (s_media.video_recovery_gop_count >= MEDIA_STORAGE_VIDEO_RECOVERY_GOPS) {
+                    s_media.video_adaptive_save_interval--;
+                    s_media.video_recovery_gop_count = 0;
+                }
+            } else {
+                s_media.video_recovery_gop_count = 0;
+            }
+        } else {
+            s_media.video_recovery_gop_count = 0;
+        }
+
         s_media.video_save_gop_count++;
-        s_media.video_save_current_gop =
-            (((s_media.video_save_gop_count - 1U) % save_interval) == 0U);
+        if (s_media.video_pressure_skip_gops > 0U) {
+            s_media.video_pressure_skip_gops--;
+            s_media.video_save_current_gop = false;
+        } else {
+            s_media.video_save_current_gop =
+                (((s_media.video_save_gop_count - 1U) % s_media.video_adaptive_save_interval) == 0U);
+        }
+        save_interval = s_media.video_adaptive_save_interval;
+        skip_gops = s_media.video_pressure_skip_gops;
     }
     skip = !s_media.video_save_current_gop;
     portEXIT_CRITICAL(&s_media_lock);
+
+    if (log_pressure) {
+        media_storage_log_video_pressure(used_slots, save_interval, skip_gops);
+    }
 
     return skip;
 }
@@ -448,7 +531,11 @@ static void media_storage_log_video_drop(const char *reason, size_t len)
 {
     TickType_t now;
     uint32_t drop_count;
+    uint32_t used_slots;
+    uint32_t save_interval;
+    uint32_t skip_gops;
     bool need_log = false;
+    const uint32_t base_interval = media_storage_base_save_interval();
 
     if (!reason) {
         reason = "unknown";
@@ -459,7 +546,20 @@ static void media_storage_log_video_drop(const char *reason, size_t len)
     s_media.video_gap_pending = true;
     s_media.video_save_current_gop = false;
     s_media.video_drop_count++;
+    if (s_media.video_adaptive_save_interval < base_interval) {
+        s_media.video_adaptive_save_interval = base_interval;
+    }
+    if (s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
+        s_media.video_adaptive_save_interval++;
+    }
+    if (s_media.video_pressure_skip_gops < MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS) {
+        s_media.video_pressure_skip_gops = MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS;
+    }
+    s_media.video_recovery_gop_count = 0;
     drop_count = s_media.video_drop_count;
+    used_slots = media_storage_count_video_slots_in_use_locked();
+    save_interval = s_media.video_adaptive_save_interval;
+    skip_gops = s_media.video_pressure_skip_gops;
     if (s_media.video_last_drop_log_tick == 0 ||
         (now - s_media.video_last_drop_log_tick) >= pdMS_TO_TICKS(MEDIA_STORAGE_VIDEO_DROP_LOG_MS)) {
         s_media.video_last_drop_log_tick = now;
@@ -468,6 +568,7 @@ static void media_storage_log_video_drop(const char *reason, size_t len)
     portEXIT_CRITICAL(&s_media_lock);
 
     if (need_log) {
+        media_storage_log_video_pressure(used_slots, save_interval, skip_gops);
         ESP_LOGW(TAG, "录像旁路丢帧 | 原因=%s | 长度=%zu | 累计=%" PRIu32,
                  reason, len, drop_count);
     }
@@ -1019,6 +1120,9 @@ static void media_storage_free_video_buffers(void)
     s_media.video_save_current_gop = false;
     s_media.video_drop_count = 0;
     s_media.video_save_gop_count = 0;
+    s_media.video_adaptive_save_interval = 0;
+    s_media.video_pressure_skip_gops = 0;
+    s_media.video_recovery_gop_count = 0;
     s_media.video_last_drop_log_tick = 0;
     media_storage_free_video_parameter_sets();
     media_storage_reset_video_segment_state();
@@ -1332,8 +1436,12 @@ static void media_storage_handle_video_frame(const media_storage_video_frame_t *
         return;
     }
 
-    media_storage_update_video_parameter_sets(frame->buf, frame->len);
     is_idr = (frame->frame_type == ESP_H264_FRAME_TYPE_IDR);
+    if (is_idr ||
+        !s_media.video_sps || s_media.video_sps_len == 0U ||
+        !s_media.video_pps || s_media.video_pps_len == 0U) {
+        media_storage_update_video_parameter_sets(frame->buf, frame->len);
+    }
 
     if (!media_storage_is_video_record_requested()) {
         media_storage_take_video_gap();
@@ -1411,7 +1519,10 @@ static void media_storage_video_task(void *arg)
                 handled_since_yield++;
                 if (handled_since_yield >= MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES) {
                     handled_since_yield = 0;
-                    vTaskDelay(1);
+                    if (!s_media.video_queue ||
+                        uxQueueMessagesWaiting(s_media.video_queue) == 0U) {
+                        vTaskDelay(1);
+                    }
                 }
             }
         } else if (!media_storage_is_video_record_requested() &&
@@ -1637,6 +1748,9 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
         s_media.video_sample_duration = 1U;
     }
     s_media.video_prepared = true;
+    s_media.video_adaptive_save_interval = media_storage_base_save_interval();
+    s_media.video_pressure_skip_gops = 0;
+    s_media.video_recovery_gop_count = 0;
 
     if (record_requested_before) {
         portENTER_CRITICAL(&s_media_lock);
@@ -1705,6 +1819,9 @@ void media_storage_start_video_record(void)
             s_media.video_gap_pending = false;
             s_media.video_save_current_gop = false;
             s_media.video_save_gop_count = 0;
+            s_media.video_adaptive_save_interval = media_storage_base_save_interval();
+            s_media.video_pressure_skip_gops = 0;
+            s_media.video_recovery_gop_count = 0;
             need_log = true;
         }
         portEXIT_CRITICAL(&s_media_lock);
@@ -1727,6 +1844,9 @@ void media_storage_start_video_record(void)
         s_media.video_gap_pending = false;
         s_media.video_save_current_gop = false;
         s_media.video_save_gop_count = 0;
+        s_media.video_adaptive_save_interval = media_storage_base_save_interval();
+        s_media.video_pressure_skip_gops = 0;
+        s_media.video_recovery_gop_count = 0;
         need_log = true;
     }
     portEXIT_CRITICAL(&s_media_lock);

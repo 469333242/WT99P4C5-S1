@@ -62,13 +62,20 @@ typedef struct {
     .gw            = NULL,                 \
     .mask          = NULL,                 \
 })
-
+#define WIFI_PROFILE_OTHER3        ((wifi_profile_t){ \
+    .ssid          = "OPPOK15ProTurbo",      \
+    .password      = "dyf07100825",           \
+    .use_static_ip = false,                \
+    .ip            = NULL,                 \
+    .gw            = NULL,                 \
+    .mask          = NULL,                 \
+})
 /* ================================================================== */
 /*    切换环境：                                       */
 /*    WIFI_PROFILE_WIN_HOTSPOT  → 公司Windows 移动热点（固定 .200）         */
 /*    WIFI_PROFILE_OTHER        → 其他热点（DHCP，串口日志查IP）          */
 /* ================================================================== */
-#define WIFI_ACTIVE_PROFILE   WIFI_PROFILE_OTHER1
+#define WIFI_ACTIVE_PROFILE   WIFI_PROFILE_OTHER2
 
 /* ================================================================== */
 /*  接口声明                                                            */

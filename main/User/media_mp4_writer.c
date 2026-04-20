@@ -30,7 +30,7 @@ static const char *TAG = "media_mp4";
 #define MP4_TRACK_ID       1
 #define MP4_HANDLER_NAME   "VideoHandler"
 #define MP4_LANGUAGE_UND   0x55C4
-#define MP4_FILE_IO_BUF_SIZE (128U * 1024U)
+#define MP4_FILE_IO_BUF_SIZE (256U * 1024U)
 
 typedef struct {
     size_t offset;
@@ -196,7 +196,8 @@ static esp_err_t media_mp4_writer_ensure_sample_buf(media_mp4_writer_t *writer,
         return ESP_OK;
     }
 
-    new_capacity = (writer->sample_buf_capacity == 0U) ? 4096U : writer->sample_buf_capacity;
+    new_capacity = (writer->sample_buf_capacity == 0U) ? (64U * 1024U)
+                                                       : writer->sample_buf_capacity;
     while (new_capacity < required) {
         if (new_capacity > (SIZE_MAX / 2U)) {
             return ESP_ERR_NO_MEM;
