@@ -1,4 +1,6 @@
 .devcontainer/
 .vscode/
 build/
-managed_components/
+managed_components/*
+!managed_components/espressif__esp_cam_sensor/sensors/ov5647/cfg/ov5647_default.json
+!managed_components/espressif__esp_cam_sensor/sensors/ov5647/ov5647.c
