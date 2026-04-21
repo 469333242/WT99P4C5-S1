@@ -62,7 +62,7 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_PHOTO_TASK_PRIORITY     5
 #define MEDIA_STORAGE_PHOTO_TASK_CORE         0
 #define MEDIA_STORAGE_VIDEO_TASK_STACK_SIZE   (12 * 1024)
-#define MEDIA_STORAGE_VIDEO_TASK_PRIORITY     6
+#define MEDIA_STORAGE_VIDEO_TASK_PRIORITY     8
 #define MEDIA_STORAGE_VIDEO_TASK_CORE         0
 #define MEDIA_STORAGE_DMA_ALIGN               64
 #define MEDIA_STORAGE_MAX_PATH_LEN            192
@@ -71,7 +71,7 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN         60
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_1080P   12
-#define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    18
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    30
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
 #define MEDIA_STORAGE_VIDEO_SEGMENT_SEC       120U
 #define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
@@ -1613,8 +1613,14 @@ static void media_storage_video_task(void *arg)
                 media_storage_release_video_slot((int)slot_index);
                 handled_since_yield++;
                 if (handled_since_yield >= MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES) {
+                    UBaseType_t pending_items = uxQueueMessagesWaiting(s_media.video_queue);
+
                     handled_since_yield = 0;
-                    vTaskDelay(1);
+                    if (pending_items == 0U) {
+                        vTaskDelay(1);
+                    } else {
+                        taskYIELD();
+                    }
                 }
             }
         } else if (!media_storage_is_video_record_requested() &&
