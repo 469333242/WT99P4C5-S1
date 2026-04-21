@@ -70,6 +70,8 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_TIMESTAMP_LEN           32
 #define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN         60
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN_1080P   12
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    18
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
 #define MEDIA_STORAGE_VIDEO_SEGMENT_SEC       120U
 #define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
@@ -80,9 +82,6 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX 1U
 #define MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS   0U
 #define MEDIA_STORAGE_VIDEO_RECOVERY_GOPS        2U
-#define MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 2U) / 3U)
-#define MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK  ((MEDIA_STORAGE_VIDEO_QUEUE_LEN + 1U) / 2U)
-#define MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 5U) / 6U)
 #define MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES 120U
 #define MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_HIGH 3U
 #define MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_CRITICAL 2U
@@ -145,6 +144,7 @@ typedef struct {
     QueueHandle_t         video_queue;
     media_storage_video_frame_t video_frames[MEDIA_STORAGE_VIDEO_QUEUE_LEN];
     bool                  video_slot_in_use[MEDIA_STORAGE_VIDEO_QUEUE_LEN];
+    uint32_t              video_slot_count;
     size_t                video_frame_buf_size;
     uint32_t              video_width;
     uint32_t              video_height;
@@ -205,6 +205,35 @@ static size_t media_storage_calc_video_frame_buf_size(uint32_t width, uint32_t h
      * below the previous 24 x 256 KB footprint while still leaving IDR margin.
      */
     return media_storage_align_size(MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE);
+}
+
+static uint32_t media_storage_calc_video_slot_count(uint32_t width, uint32_t height)
+{
+    const uint32_t pixels = width * height;
+
+    if (pixels >= (1920U * 1080U)) {
+        return MEDIA_STORAGE_VIDEO_QUEUE_LEN_1080P;
+    }
+    if (pixels >= (1280U * 960U)) {
+        return MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA;
+    }
+
+    return MEDIA_STORAGE_VIDEO_QUEUE_LEN;
+}
+
+static uint32_t media_storage_video_queue_high_watermark(void)
+{
+    return (s_media.video_slot_count * 2U) / 3U;
+}
+
+static uint32_t media_storage_video_queue_low_watermark(void)
+{
+    return (s_media.video_slot_count + 1U) / 2U;
+}
+
+static uint32_t media_storage_video_queue_critical_watermark(void)
+{
+    return (s_media.video_slot_count * 5U) / 6U;
 }
 
 static esp_err_t media_storage_append_text(char *dst, size_t dst_size,
@@ -419,7 +448,7 @@ static uint32_t media_storage_count_video_slots_in_use_locked(void)
 {
     uint32_t used_slots = 0;
 
-    for (int i = 0; i < MEDIA_STORAGE_VIDEO_QUEUE_LEN; i++) {
+    for (uint32_t i = 0; i < s_media.video_slot_count; i++) {
         if (s_media.video_slot_in_use[i]) {
             used_slots++;
         }
@@ -435,6 +464,11 @@ static void media_storage_log_video_pressure(uint32_t used_slots,
 {
     static TickType_t s_last_pressure_log_tick = 0;
     TickType_t now = xTaskGetTickCount();
+    uint32_t slot_count = s_media.video_slot_count;
+
+    if (slot_count == 0U) {
+        slot_count = MEDIA_STORAGE_VIDEO_QUEUE_LEN;
+    }
 
     if (s_last_pressure_log_tick != 0 &&
         (now - s_last_pressure_log_tick) < pdMS_TO_TICKS(MEDIA_STORAGE_VIDEO_DROP_LOG_MS)) {
@@ -445,12 +479,12 @@ static void media_storage_log_video_pressure(uint32_t used_slots,
     if (non_idr_skip_mod > 1U) {
         ESP_LOGW(TAG,
                  "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP | 非IDR抽帧=1/%" PRIu32,
-                 used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops,
+                 used_slots, (unsigned)slot_count, save_interval, skip_gops,
                  non_idr_skip_mod);
     } else {
         ESP_LOGW(TAG,
                  "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP",
-                 used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops);
+                 used_slots, (unsigned)slot_count, save_interval, skip_gops);
     }
 }
 
@@ -470,15 +504,15 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
         s_media.video_adaptive_save_interval = base_interval;
     }
     used_slots = media_storage_count_video_slots_in_use_locked();
-    if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK) {
+    if (used_slots >= media_storage_video_queue_critical_watermark()) {
         non_idr_skip_mod = MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_CRITICAL;
-    } else if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK) {
+    } else if (used_slots >= media_storage_video_queue_high_watermark()) {
         non_idr_skip_mod = MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_HIGH;
     }
 
     if (frame_type == ESP_H264_FRAME_TYPE_IDR) {
         pressure_worsened = (used_slots > s_media.video_last_idr_used_slots);
-        if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK) {
+        if (used_slots >= media_storage_video_queue_high_watermark()) {
             if (pressure_worsened &&
                 s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
                 s_media.video_adaptive_save_interval++;
@@ -490,8 +524,8 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
             }
             s_media.video_recovery_gop_count = 0;
             log_pressure = pressure_worsened ||
-                           (s_media.video_last_idr_used_slots < MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK);
-        } else if (used_slots <= MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK) {
+                           (s_media.video_last_idr_used_slots < media_storage_video_queue_high_watermark());
+        } else if (used_slots <= media_storage_video_queue_low_watermark()) {
             if (s_media.video_adaptive_save_interval > base_interval) {
                 s_media.video_recovery_gop_count++;
                 if (s_media.video_recovery_gop_count >= MEDIA_STORAGE_VIDEO_RECOVERY_GOPS) {
@@ -516,7 +550,7 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
         save_interval = s_media.video_adaptive_save_interval;
         skip_gops = s_media.video_pressure_skip_gops;
         s_media.video_last_idr_used_slots = used_slots;
-    } else if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK &&
+    } else if (used_slots >= media_storage_video_queue_critical_watermark() &&
                used_slots > s_media.video_last_idr_used_slots &&
                s_media.video_save_current_gop) {
         if (s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
@@ -556,10 +590,10 @@ static int media_storage_acquire_video_slot(void)
     int slot = -1;
 
     portENTER_CRITICAL(&s_media_lock);
-    for (int i = 0; i < MEDIA_STORAGE_VIDEO_QUEUE_LEN; i++) {
+    for (uint32_t i = 0; i < s_media.video_slot_count; i++) {
         if (!s_media.video_slot_in_use[i]) {
             s_media.video_slot_in_use[i] = true;
-            slot = i;
+            slot = (int)i;
             break;
         }
     }
@@ -569,7 +603,7 @@ static int media_storage_acquire_video_slot(void)
 
 static void media_storage_release_video_slot(int slot)
 {
-    if (slot < 0 || slot >= MEDIA_STORAGE_VIDEO_QUEUE_LEN) {
+    if (slot < 0 || (uint32_t)slot >= s_media.video_slot_count) {
         return;
     }
 
@@ -1162,6 +1196,7 @@ static void media_storage_free_video_buffers(void)
     }
 
     s_media.video_frame_buf_size = 0;
+    s_media.video_slot_count = 0;
     s_media.video_width = 0;
     s_media.video_height = 0;
     s_media.video_fps = 0;
@@ -1572,7 +1607,7 @@ static void media_storage_video_task(void *arg)
     while (1) {
         if (xQueueReceive(s_media.video_queue, &slot_index,
                           pdMS_TO_TICKS(MEDIA_STORAGE_VIDEO_WAIT_MS)) == pdTRUE) {
-            if (slot_index < MEDIA_STORAGE_VIDEO_QUEUE_LEN) {
+            if (slot_index < s_media.video_slot_count) {
                 media_storage_handle_video_frame(&s_media.video_frames[slot_index]);
                 s_media.video_frames[slot_index].len = 0;
                 media_storage_release_video_slot((int)slot_index);
@@ -1751,6 +1786,7 @@ esp_err_t media_storage_prepare_photo_buffers(uint32_t width, uint32_t height)
 esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, uint32_t fps)
 {
     size_t frame_buf_size;
+    uint32_t slot_count;
     esp_err_t ret;
     bool record_requested_before;
 
@@ -1763,12 +1799,14 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
     }
 
     frame_buf_size = media_storage_calc_video_frame_buf_size(width, height);
+    slot_count = media_storage_calc_video_slot_count(width, height);
 
     if (s_media.video_prepared &&
         s_media.video_width == width &&
         s_media.video_height == height &&
         s_media.video_fps == fps &&
-        s_media.video_frame_buf_size == frame_buf_size) {
+        s_media.video_frame_buf_size == frame_buf_size &&
+        s_media.video_slot_count == slot_count) {
         return media_storage_ensure_video_task();
     }
 
@@ -1784,7 +1822,9 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
         xQueueReset(s_media.video_queue);
     }
 
-    for (int i = 0; i < MEDIA_STORAGE_VIDEO_QUEUE_LEN; i++) {
+    s_media.video_slot_count = slot_count;
+
+    for (uint32_t i = 0; i < s_media.video_slot_count; i++) {
         s_media.video_frames[i].buf = (uint8_t *)heap_caps_calloc(1, frame_buf_size,
                                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_media.video_frames[i].buf) {
@@ -1823,9 +1863,10 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
         return ret;
     }
 
-    ESP_LOGI(TAG, "video buffers ready | %ux%u@%u | queue=%d | frame_buf=%zu",
+    ESP_LOGI(TAG, "video buffers ready | %ux%u@%u | queue=%u/%u | frame_buf=%zu",
              (unsigned)width, (unsigned)height, (unsigned)fps,
-             MEDIA_STORAGE_VIDEO_QUEUE_LEN, frame_buf_size);
+             (unsigned)s_media.video_slot_count,
+             (unsigned)MEDIA_STORAGE_VIDEO_QUEUE_LEN, frame_buf_size);
     ESP_LOGI(TAG, "录像保存策略 | 每 %" PRIu32 " 个 GOP 保存 1 个，优先保证 RTSP 实时性",
              (uint32_t)MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL);
     if (record_requested_before) {

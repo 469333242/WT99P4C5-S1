@@ -149,25 +149,25 @@ void app_main(void)
 
     /* TF 卡基础驱动初始化。
      * 失败时仅记录日志，不影响现有 RTSP / WiFi / UART 功能。 */
-    //err = tf_card_init();
-    //if (err != ESP_OK) {
-    //    ESP_LOGW(TAG, "TF 卡初始化失败: 0x%x", err);
-    //}
-//
-    ///* 媒体存储模块初始化。
-    // * 当前先启用自动照片存储能力；若 TF 卡未就绪，仅记录日志，不影响 RTSP 功能。 */
-    //err = media_storage_init();
-    //if (err != ESP_OK) {
-    //    ESP_LOGW(TAG, "媒体存储模块初始化失败: 0x%x", err);
-    //}
-//
-    ///* 启动 SD 卡媒体网页浏览服务（HTTP 80 端口） */
-    //err = photo_web_server_start();
-    //if (err != ESP_OK) {
-    //    ESP_LOGW(TAG, "媒体网页服务启动失败: 0x%x", err);
-    //} else {
-    //    ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<IP>/");
-    //}
+    err = tf_card_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "TF 卡初始化失败: 0x%x", err);
+    }
+
+    /* 媒体存储模块初始化。
+     * 当前先启用自动照片存储能力；若 TF 卡未就绪，仅记录日志，不影响 RTSP 功能。 */
+    err = media_storage_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "媒体存储模块初始化失败: 0x%x", err);
+    }
+
+    /* 启动 SD 卡媒体网页浏览服务（HTTP 80 端口） */
+    err = photo_web_server_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "媒体网页服务启动失败: 0x%x", err);
+    } else {
+        ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<IP>/");
+    }
 
     /* 5. 启动 RTSP 服务器（端口 8554） */
     err = rtsp_server_start();

@@ -37,8 +37,133 @@
 #include "camera.h"
 #include "media_storage.h"
 #include "rtsp_server.h"
+#include "../../managed_components/espressif__esp_cam_sensor/sensors/ov5647/private_include/ov5647_settings.h"
 
 static const char *TAG = "camera";
+
+#if CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS
+static const esp_cam_sensor_isp_info_t s_ov5647_isp_1280x960 = {
+    .isp_v1_info = {
+        .version = SENSOR_ISP_INFO_VERSION_DEFAULT,
+        .pclk = 88333333,
+        .vts = 1796,
+        .hts = 1093,
+        .bayer_type = ESP_CAM_SENSOR_BAYER_GBRG,
+    }
+};
+
+static const esp_cam_sensor_format_t s_ov5647_fmt_1280x960 = {
+    .name = "MIPI_2lane_24Minput_RAW10_1280x960_binning_45fps",
+    .format = ESP_CAM_SENSOR_PIXFORMAT_RAW10,
+    .port = ESP_CAM_SENSOR_MIPI_CSI,
+    .xclk = 24000000,
+    .width = 1280,
+    .height = 960,
+    .regs = ov5647_mipi_2lane_24Minput_1280x960_raw10_45fps,
+    .regs_size = sizeof(ov5647_mipi_2lane_24Minput_1280x960_raw10_45fps) / sizeof(ov5647_mipi_2lane_24Minput_1280x960_raw10_45fps[0]),
+    .fps = 45,
+    .isp_info = &s_ov5647_isp_1280x960,
+    .mipi_info = {
+        .mipi_clk = OV5647_MIPI_CSI_LINE_RATE_1280x960_45FPS,
+        .lane_num = 2,
+        .line_sync_en = CONFIG_CAMERA_OV5647_CSI_LINESYNC_ENABLE ? true : false,
+    },
+    .reserved = NULL,
+};
+#endif
+
+#if CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS
+static const esp_cam_sensor_isp_info_t s_ov5647_isp_1920x1080 = {
+    .isp_v1_info = {
+        .version = SENSOR_ISP_INFO_VERSION_DEFAULT,
+        .pclk = 81666700,
+        .vts = 1104,
+        .hts = 2416,
+        .bayer_type = ESP_CAM_SENSOR_BAYER_GBRG,
+    }
+};
+
+static const esp_cam_sensor_format_t s_ov5647_fmt_1920x1080 = {
+    .name = "MIPI_2lane_24Minput_RAW10_1920x1080_30fps",
+    .format = ESP_CAM_SENSOR_PIXFORMAT_RAW10,
+    .port = ESP_CAM_SENSOR_MIPI_CSI,
+    .xclk = 24000000,
+    .width = 1920,
+    .height = 1080,
+    .regs = ov5647_mipi_2lane_24Minput_1920x1080_raw10_30fps,
+    .regs_size = sizeof(ov5647_mipi_2lane_24Minput_1920x1080_raw10_30fps) / sizeof(ov5647_mipi_2lane_24Minput_1920x1080_raw10_30fps[0]),
+    .fps = 30,
+    .isp_info = &s_ov5647_isp_1920x1080,
+    .mipi_info = {
+        .mipi_clk = OV5647_MIPI_CSI_LINE_RATE_1920x1080_30FPS,
+        .lane_num = 2,
+        .line_sync_en = CONFIG_CAMERA_OV5647_CSI_LINESYNC_ENABLE ? true : false,
+    },
+    .reserved = NULL,
+};
+#endif
+
+#if CONFIG_CAMERA_OV5647_MIPI_RAW8_800X800_50FPS
+static const esp_cam_sensor_isp_info_t s_ov5647_isp_800x800 = {
+    .isp_v1_info = {
+        .version = SENSOR_ISP_INFO_VERSION_DEFAULT,
+        .pclk = 81666700,
+        .vts = 1896,
+        .hts = 984,
+        .bayer_type = ESP_CAM_SENSOR_BAYER_GBRG,
+    }
+};
+
+static const esp_cam_sensor_format_t s_ov5647_fmt_800x800 = {
+    .name = "MIPI_2lane_24Minput_RAW8_800x800_50fps",
+    .format = ESP_CAM_SENSOR_PIXFORMAT_RAW8,
+    .port = ESP_CAM_SENSOR_MIPI_CSI,
+    .xclk = 24000000,
+    .width = 800,
+    .height = 800,
+    .regs = ov5647_mipi_2lane_24Minput_800x800_raw8_50fps,
+    .regs_size = sizeof(ov5647_mipi_2lane_24Minput_800x800_raw8_50fps) / sizeof(ov5647_mipi_2lane_24Minput_800x800_raw8_50fps[0]),
+    .fps = 50,
+    .isp_info = &s_ov5647_isp_800x800,
+    .mipi_info = {
+        .mipi_clk = OV5647_MIPI_CSI_LINE_RATE_800x800_50FPS,
+        .lane_num = 2,
+        .line_sync_en = CONFIG_CAMERA_OV5647_CSI_LINESYNC_ENABLE ? true : false,
+    },
+    .reserved = NULL,
+};
+#endif
+
+#if CONFIG_CAMERA_OV5647_MIPI_RAW8_800X640_50FPS
+static const esp_cam_sensor_isp_info_t s_ov5647_isp_800x640 = {
+    .isp_v1_info = {
+        .version = SENSOR_ISP_INFO_VERSION_DEFAULT,
+        .pclk = 81666700,
+        .vts = 1896,
+        .hts = 984,
+        .bayer_type = ESP_CAM_SENSOR_BAYER_GBRG,
+    }
+};
+
+static const esp_cam_sensor_format_t s_ov5647_fmt_800x640 = {
+    .name = "MIPI_2lane_24Minput_RAW8_800x640_50fps",
+    .format = ESP_CAM_SENSOR_PIXFORMAT_RAW8,
+    .port = ESP_CAM_SENSOR_MIPI_CSI,
+    .xclk = 24000000,
+    .width = 800,
+    .height = 640,
+    .regs = ov5647_mipi_2lane_24Minput_800x640_raw8_50fps,
+    .regs_size = sizeof(ov5647_mipi_2lane_24Minput_800x640_raw8_50fps) / sizeof(ov5647_mipi_2lane_24Minput_800x640_raw8_50fps[0]),
+    .fps = 50,
+    .isp_info = &s_ov5647_isp_800x640,
+    .mipi_info = {
+        .mipi_clk = OV5647_MIPI_CSI_LINE_RATE_800x640_50FPS,
+        .lane_num = 2,
+        .line_sync_en = CONFIG_CAMERA_OV5647_CSI_LINESYNC_ENABLE ? true : false,
+    },
+    .reserved = NULL,
+};
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 配置参数                                                             */
@@ -58,6 +183,7 @@ static const char *TAG = "camera";
  * 1 = 1280x960
  * 2 = 1920x1080
  * 3 = 800x800
+ * 4 = 800x640
  */
 #define H264_PROFILE_1280X960   1
 #define H264_PROFILE_1920X1080  2
@@ -180,7 +306,7 @@ static void on_rtsp_playing(bool playing)
     }
 }
 
-static void log_sensor_format(const char *stage)
+static void __attribute__((unused)) log_sensor_format(const char *stage)
 {
     esp_cam_sensor_format_t sensor_fmt = {0};
 
@@ -200,6 +326,62 @@ static void log_sensor_format(const char *stage)
              sensor_fmt.mipi_info.mipi_clk,
              sensor_fmt.mipi_info.lane_num,
              sensor_fmt.mipi_info.line_sync_en ? "on" : "off");
+}
+
+static const esp_cam_sensor_format_t *get_target_ov5647_sensor_format(uint32_t width, uint32_t height)
+{
+#if CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS
+    if (width == 1280 && height == 960) {
+        return &s_ov5647_fmt_1280x960;
+    }
+#endif
+#if CONFIG_CAMERA_OV5647_MIPI_RAW10_1920X1080_30FPS
+    if (width == 1920 && height == 1080) {
+        return &s_ov5647_fmt_1920x1080;
+    }
+#endif
+#if CONFIG_CAMERA_OV5647_MIPI_RAW8_800X800_50FPS
+    if (width == 800 && height == 800) {
+        return &s_ov5647_fmt_800x800;
+    }
+#endif
+#if CONFIG_CAMERA_OV5647_MIPI_RAW8_800X640_50FPS
+    if (width == 800 && height == 640) {
+        return &s_ov5647_fmt_800x640;
+    }
+#endif
+
+    return NULL;
+}
+
+static esp_err_t select_sensor_mode_for_profile(void)
+{
+    esp_cam_sensor_format_t sensor_fmt = {0};
+    const esp_cam_sensor_format_t *target_sensor_fmt = NULL;
+
+    if (ioctl(s_cam.fd, VIDIOC_G_SENSOR_FMT, &sensor_fmt) != 0) {
+        ESP_LOGE(TAG, "failed to read sensor format: errno=%d", errno);
+        return ESP_FAIL;
+    }
+
+    if (sensor_fmt.width == H264_WIDTH && sensor_fmt.height == H264_HEIGHT) {
+        return ESP_OK;
+    }
+
+    target_sensor_fmt = get_target_ov5647_sensor_format(H264_WIDTH, H264_HEIGHT);
+    if (target_sensor_fmt == NULL) {
+        ESP_LOGE(TAG,
+                 "target sensor format %ux%u is not enabled in sdkconfig",
+                 H264_WIDTH, H264_HEIGHT);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (ioctl(s_cam.fd, VIDIOC_S_SENSOR_FMT, (void *)target_sensor_fmt) != 0) {
+        ESP_LOGE(TAG, "failed to switch sensor format: errno=%d", errno);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -446,9 +628,7 @@ esp_err_t camera_init(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "默认格式: %"PRIu32"x%"PRIu32" pixfmt=0x%"PRIx32,
-             fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.pixelformat);
-    log_sensor_format("默认传感器模式");
+    ESP_RETURN_ON_ERROR(select_sensor_mode_for_profile(), TAG, "failed to switch sensor format");
 
     /* 枚举所有支持的格式 */
     struct v4l2_fmtdesc fmtdesc;
@@ -487,20 +667,8 @@ esp_err_t camera_init(void)
 
     ESP_LOGI(TAG, "使用格式: %"PRIu32"x%"PRIu32" YUV420（硬件ISP转换）",
              s_cam.width, s_cam.height);
-    log_sensor_format("当前传感器模式");
-
-    /* 预分配照片旁路缓冲，避免 RTSP 开始推流后首次拍照再申请大块内存。 */
-    esp_err_t media_ret = media_storage_prepare_photo_buffers(s_cam.width, s_cam.height);
-    if (media_ret != ESP_OK) {
-        ESP_LOGW(TAG, "照片缓冲预分配失败，自动拍照将跳过或延后: 0x%x", media_ret);
-    }
 
     /* 4. 申请 MMAP 缓冲 */
-    media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
-    if (media_ret != ESP_OK) {
-        ESP_LOGW(TAG, "video record prepare failed, RTSP keeps running: 0x%x", media_ret);
-    }
-
     struct v4l2_requestbuffers req = {
         .count  = CAM_BUF_COUNT,
         .type   = V4L2_BUF_TYPE_VIDEO_CAPTURE,
@@ -578,6 +746,17 @@ esp_err_t camera_init(void)
 
     ESP_LOGI(TAG, "H.264 输出缓冲: %zu 字节 (%.1f MB)",
              s_cam.h264_out_buf_size, s_cam.h264_out_buf_size / (1024.0 * 1024.0));
+
+    /* 让 CSI/MMAP/H.264 主链路先拿到核心资源，再预分配 TF 旁路缓冲，降低大分辨率下的初始化失败概率。 */
+    esp_err_t media_ret = media_storage_prepare_photo_buffers(s_cam.width, s_cam.height);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG, "照片缓冲预分配失败，自动拍照将跳过或延后: 0x%x", media_ret);
+    }
+
+    media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG, "video record prepare failed, RTSP keeps running: 0x%x", media_ret);
+    }
 
     ESP_LOGI(TAG, "H.264 编码器初始化完成: %"PRIu32"x%"PRIu32"@%dfps, GOP=%d, 码率=%"PRIu32" bps",
              s_cam.width, s_cam.height, H264_FPS, H264_GOP, bitrate);
