@@ -70,7 +70,7 @@ static const char *TAG = "camera";
 #define H264_WIDTH          1280         /* 编码宽度 */
 #define H264_HEIGHT         960          /* 编码高度 */
 #define H264_FPS            45           /* 双客户端默认降到 30fps，降低链路堆积 */
-#define H264_GOP            4            /* 约 133ms 一个 IDR，丢帧后更快恢复 */
+#define H264_GOP            4            /* 约 89ms 一个 IDR，优先保证 RTSP 快速恢复 */
 #define H264_BITRATE        3500000      /* 平均码率，静止时略低于，运动时略高于 */
 #define H264_QP_MIN         28           /* 最小QP */
 #define H264_QP_MAX         34           /* 最大QP */

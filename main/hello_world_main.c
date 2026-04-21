@@ -141,15 +141,14 @@ void app_main(void)
         ESP_LOGW(TAG, "WiFi IP 未就绪，仍在等待重连完成...");
     }
     ESP_LOGI(TAG, "WiFi IP 已就绪，开始启动各项服务");
-
-    //err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
-    //if (err != ESP_OK) {
-    //    ESP_LOGW(TAG, "网络校时未完成，若保存路径仍为默认时间，请先打开媒体网页同步电脑时间");
-    //}
+    err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "网络校时未完成，若保存路径仍为默认时间，请先打开媒体网页同步电脑时间");
+    }
 #endif
 
-    ///* TF 卡基础驱动初始化。
-    // * 失败时仅记录日志，不影响现有 RTSP / WiFi / UART 功能。 */
+    /* TF 卡基础驱动初始化。
+     * 失败时仅记录日志，不影响现有 RTSP / WiFi / UART 功能。 */
     //err = tf_card_init();
     //if (err != ESP_OK) {
     //    ESP_LOGW(TAG, "TF 卡初始化失败: 0x%x", err);

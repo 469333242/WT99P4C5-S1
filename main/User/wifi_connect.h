@@ -57,10 +57,10 @@ typedef struct {
 #define WIFI_PROFILE_OTHER2        ((wifi_profile_t){ \
     .ssid          = "CEEWA",                \
     .password      = "52285509",        \
-    .use_static_ip = false,                \
-    .ip            = NULL,                 \
-    .gw            = NULL,                 \
-    .mask          = NULL,                 \
+    .use_static_ip = true,                 \
+    .ip            = "192.168.0.200",    \
+    .gw            = "192.168.0.1",      \
+    .mask          = "255.255.255.0",      \
 })
 #define WIFI_PROFILE_OTHER3        ((wifi_profile_t){ \
     .ssid          = "OPPOK15ProTurbo",      \

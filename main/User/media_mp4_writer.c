@@ -30,7 +30,7 @@ static const char *TAG = "media_mp4";
 #define MP4_TRACK_ID       1
 #define MP4_HANDLER_NAME   "VideoHandler"
 #define MP4_LANGUAGE_UND   0x55C4
-#define MP4_FILE_IO_BUF_SIZE (256U * 1024U)
+#define MP4_FILE_IO_BUF_SIZE (512U * 1024U)
 
 typedef struct {
     size_t offset;

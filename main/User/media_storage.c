@@ -62,27 +62,30 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_PHOTO_TASK_PRIORITY     5
 #define MEDIA_STORAGE_PHOTO_TASK_CORE         0
 #define MEDIA_STORAGE_VIDEO_TASK_STACK_SIZE   (12 * 1024)
-#define MEDIA_STORAGE_VIDEO_TASK_PRIORITY     8
+#define MEDIA_STORAGE_VIDEO_TASK_PRIORITY     6
 #define MEDIA_STORAGE_VIDEO_TASK_CORE         0
 #define MEDIA_STORAGE_DMA_ALIGN               64
 #define MEDIA_STORAGE_MAX_PATH_LEN            192
 #define MEDIA_STORAGE_DATE_TAG_LEN            9
 #define MEDIA_STORAGE_TIMESTAMP_LEN           32
 #define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
-#define MEDIA_STORAGE_VIDEO_QUEUE_LEN         24
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN         60
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
 #define MEDIA_STORAGE_VIDEO_SEGMENT_SEC       120U
 #define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
 #define MEDIA_STORAGE_VIDEO_TIMESCALE         90000U
-#define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE    (256U * 1024U)
+#define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE    (128U * 1024U)
 #define MEDIA_STORAGE_VIDEO_DROP_LOG_MS       1000
-#define MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL 2U
-#define MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX 4U
-#define MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS   2U
-#define MEDIA_STORAGE_VIDEO_RECOVERY_GOPS        3U
-#define MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 3U) / 4U)
-#define MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK  ((MEDIA_STORAGE_VIDEO_QUEUE_LEN + 3U) / 4U)
-#define MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES 24U
+#define MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL 1U
+#define MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX 1U
+#define MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS   0U
+#define MEDIA_STORAGE_VIDEO_RECOVERY_GOPS        2U
+#define MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 2U) / 3U)
+#define MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK  ((MEDIA_STORAGE_VIDEO_QUEUE_LEN + 1U) / 2U)
+#define MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK ((MEDIA_STORAGE_VIDEO_QUEUE_LEN * 5U) / 6U)
+#define MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES 120U
+#define MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_HIGH 3U
+#define MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_CRITICAL 2U
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_MASK    0x1F
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_SPS     7
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_PPS     8
@@ -163,6 +166,8 @@ typedef struct {
     uint32_t              video_adaptive_save_interval;
     uint32_t              video_pressure_skip_gops;
     uint32_t              video_recovery_gop_count;
+    uint32_t              video_last_idr_used_slots;
+    uint32_t              video_non_idr_frame_count;
     TickType_t            video_last_drop_log_tick;
 } media_storage_ctx_t;
 
@@ -196,8 +201,8 @@ static size_t media_storage_calc_video_frame_buf_size(uint32_t width, uint32_t h
     (void)height;
 
     /*
-     * 录像旁路保存的是 H.264 压缩帧，不需要按原始图像尺寸申请大缓冲。
-     * 1280x960@45fps/约4Mbps实测单帧约10KB，256KB给IDR帧和码率波动留足余量。
+     * Store compressed H.264 frames only. 128 KB keeps the 45-slot pool
+     * below the previous 24 x 256 KB footprint while still leaving IDR margin.
      */
     return media_storage_align_size(MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE);
 }
@@ -425,7 +430,8 @@ static uint32_t media_storage_count_video_slots_in_use_locked(void)
 
 static void media_storage_log_video_pressure(uint32_t used_slots,
                                              uint32_t save_interval,
-                                             uint32_t skip_gops)
+                                             uint32_t skip_gops,
+                                             uint32_t non_idr_skip_mod)
 {
     static TickType_t s_last_pressure_log_tick = 0;
     TickType_t now = xTaskGetTickCount();
@@ -436,9 +442,16 @@ static void media_storage_log_video_pressure(uint32_t used_slots,
     }
 
     s_last_pressure_log_tick = now;
-    ESP_LOGW(TAG,
-             "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP",
-             used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops);
+    if (non_idr_skip_mod > 1U) {
+        ESP_LOGW(TAG,
+                 "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP | 非IDR抽帧=1/%" PRIu32,
+                 used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops,
+                 non_idr_skip_mod);
+    } else {
+        ESP_LOGW(TAG,
+                 "录像旁路积压偏高 | 占用=%" PRIu32 "/%u | 当前保存间隔=%" PRIu32 " | 临时跳过=%" PRIu32 " 个 GOP",
+                 used_slots, MEDIA_STORAGE_VIDEO_QUEUE_LEN, save_interval, skip_gops);
+    }
 }
 
 static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_type)
@@ -447,24 +460,37 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
     uint32_t used_slots = 0;
     uint32_t save_interval = 0;
     uint32_t skip_gops = 0;
+    uint32_t non_idr_skip_mod = 0;
     bool log_pressure = false;
+    bool pressure_worsened = false;
     const uint32_t base_interval = media_storage_base_save_interval();
 
     portENTER_CRITICAL(&s_media_lock);
     if (s_media.video_adaptive_save_interval < base_interval) {
         s_media.video_adaptive_save_interval = base_interval;
     }
+    used_slots = media_storage_count_video_slots_in_use_locked();
+    if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK) {
+        non_idr_skip_mod = MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_CRITICAL;
+    } else if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK) {
+        non_idr_skip_mod = MEDIA_STORAGE_VIDEO_NON_IDR_SKIP_MOD_HIGH;
+    }
+
     if (frame_type == ESP_H264_FRAME_TYPE_IDR) {
-        used_slots = media_storage_count_video_slots_in_use_locked();
+        pressure_worsened = (used_slots > s_media.video_last_idr_used_slots);
         if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK) {
-            if (s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
+            if (pressure_worsened &&
+                s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
                 s_media.video_adaptive_save_interval++;
             }
-            if (s_media.video_pressure_skip_gops < 1U) {
-                s_media.video_pressure_skip_gops = 1U;
+            if (MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS > 0U &&
+                pressure_worsened &&
+                s_media.video_pressure_skip_gops < MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS) {
+                s_media.video_pressure_skip_gops = MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS;
             }
             s_media.video_recovery_gop_count = 0;
-            log_pressure = true;
+            log_pressure = pressure_worsened ||
+                           (s_media.video_last_idr_used_slots < MEDIA_STORAGE_VIDEO_QUEUE_HIGH_WATERMARK);
         } else if (used_slots <= MEDIA_STORAGE_VIDEO_QUEUE_LOW_WATERMARK) {
             if (s_media.video_adaptive_save_interval > base_interval) {
                 s_media.video_recovery_gop_count++;
@@ -489,12 +515,37 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
         }
         save_interval = s_media.video_adaptive_save_interval;
         skip_gops = s_media.video_pressure_skip_gops;
+        s_media.video_last_idr_used_slots = used_slots;
+    } else if (used_slots >= MEDIA_STORAGE_VIDEO_QUEUE_CRITICAL_WATERMARK &&
+               used_slots > s_media.video_last_idr_used_slots &&
+               s_media.video_save_current_gop) {
+        if (s_media.video_adaptive_save_interval < MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX) {
+            s_media.video_adaptive_save_interval++;
+        }
+        if (MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS > 0U &&
+            s_media.video_pressure_skip_gops < MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS) {
+            s_media.video_pressure_skip_gops = MEDIA_STORAGE_VIDEO_PRESSURE_SKIP_GOPS;
+        }
+        s_media.video_recovery_gop_count = 0;
+        s_media.video_gap_pending = true;
+        s_media.video_save_current_gop = false;
+        save_interval = s_media.video_adaptive_save_interval;
+        skip_gops = s_media.video_pressure_skip_gops;
+        log_pressure = true;
     }
     skip = !s_media.video_save_current_gop;
+    if (!skip && frame_type != ESP_H264_FRAME_TYPE_IDR) {
+        if (non_idr_skip_mod > 1U) {
+            s_media.video_non_idr_frame_count++;
+            if ((s_media.video_non_idr_frame_count % non_idr_skip_mod) == 0U) {
+                skip = true;
+            }
+        }
+    }
     portEXIT_CRITICAL(&s_media_lock);
 
     if (log_pressure) {
-        media_storage_log_video_pressure(used_slots, save_interval, skip_gops);
+        media_storage_log_video_pressure(used_slots, save_interval, skip_gops, non_idr_skip_mod);
     }
 
     return skip;
@@ -558,6 +609,7 @@ static void media_storage_log_video_drop(const char *reason, size_t len)
     s_media.video_recovery_gop_count = 0;
     drop_count = s_media.video_drop_count;
     used_slots = media_storage_count_video_slots_in_use_locked();
+    s_media.video_last_idr_used_slots = used_slots;
     save_interval = s_media.video_adaptive_save_interval;
     skip_gops = s_media.video_pressure_skip_gops;
     if (s_media.video_last_drop_log_tick == 0 ||
@@ -568,7 +620,7 @@ static void media_storage_log_video_drop(const char *reason, size_t len)
     portEXIT_CRITICAL(&s_media_lock);
 
     if (need_log) {
-        media_storage_log_video_pressure(used_slots, save_interval, skip_gops);
+        media_storage_log_video_pressure(used_slots, save_interval, skip_gops, 0U);
         ESP_LOGW(TAG, "录像旁路丢帧 | 原因=%s | 长度=%zu | 累计=%" PRIu32,
                  reason, len, drop_count);
     }
@@ -1123,6 +1175,8 @@ static void media_storage_free_video_buffers(void)
     s_media.video_adaptive_save_interval = 0;
     s_media.video_pressure_skip_gops = 0;
     s_media.video_recovery_gop_count = 0;
+    s_media.video_last_idr_used_slots = 0;
+    s_media.video_non_idr_frame_count = 0;
     s_media.video_last_drop_log_tick = 0;
     media_storage_free_video_parameter_sets();
     media_storage_reset_video_segment_state();
@@ -1490,9 +1544,15 @@ static void media_storage_handle_video_frame(const media_storage_video_frame_t *
         }
     }
 
+    /*
+     * Use a compact recording timeline. If the recorder has to skip frames
+     * under SD pressure, playback jumps over the missing frames instead of
+     * freezing on the previous frame for the elapsed wall-clock gap.
+     */
     ret = media_mp4_writer_write_frame(&s_media.video_writer,
                                        frame->buf, frame->len,
-                                       frame->pts, is_idr);
+                                       s_media.video_segment_frame_count * s_media.video_sample_duration,
+                                       is_idr);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "写入 MP4 帧失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         media_storage_video_abort_segment();
@@ -1519,10 +1579,7 @@ static void media_storage_video_task(void *arg)
                 handled_since_yield++;
                 if (handled_since_yield >= MEDIA_STORAGE_VIDEO_TASK_YIELD_FRAMES) {
                     handled_since_yield = 0;
-                    if (!s_media.video_queue ||
-                        uxQueueMessagesWaiting(s_media.video_queue) == 0U) {
-                        vTaskDelay(1);
-                    }
+                    vTaskDelay(1);
                 }
             }
         } else if (!media_storage_is_video_record_requested() &&
@@ -1751,6 +1808,8 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
     s_media.video_adaptive_save_interval = media_storage_base_save_interval();
     s_media.video_pressure_skip_gops = 0;
     s_media.video_recovery_gop_count = 0;
+    s_media.video_last_idr_used_slots = 0;
+    s_media.video_non_idr_frame_count = 0;
 
     if (record_requested_before) {
         portENTER_CRITICAL(&s_media_lock);
@@ -1822,6 +1881,8 @@ void media_storage_start_video_record(void)
             s_media.video_adaptive_save_interval = media_storage_base_save_interval();
             s_media.video_pressure_skip_gops = 0;
             s_media.video_recovery_gop_count = 0;
+            s_media.video_last_idr_used_slots = 0;
+            s_media.video_non_idr_frame_count = 0;
             need_log = true;
         }
         portEXIT_CRITICAL(&s_media_lock);
@@ -1847,6 +1908,8 @@ void media_storage_start_video_record(void)
         s_media.video_adaptive_save_interval = media_storage_base_save_interval();
         s_media.video_pressure_skip_gops = 0;
         s_media.video_recovery_gop_count = 0;
+        s_media.video_last_idr_used_slots = 0;
+        s_media.video_non_idr_frame_count = 0;
         need_log = true;
     }
     portEXIT_CRITICAL(&s_media_lock);
