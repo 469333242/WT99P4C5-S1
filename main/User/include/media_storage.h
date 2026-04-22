@@ -3,7 +3,7 @@
  * @brief 媒体存储模块接口
  *
  * 当前模块负责 TF 卡媒体保存：
- *   - RTSP 开始推流后触发一次自动拍照
+ *   - 收到拍照请求后，在下一帧图像到达时保存一张照片
  *   - 复用摄像头 YUV420 帧，后台使用 PPA + JPEG 硬件编码保存照片
  *   - 复用现有 H.264 硬件编码帧，后台封装为 MP4 并按 2 分钟切段
  *   - 照片和录像共用同一个本次上电会话目录
@@ -72,11 +72,11 @@ esp_err_t media_storage_prepare_photo_buffers(uint32_t width, uint32_t height);
 esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, uint32_t fps);
 
 /**
- * @brief 请求一次自动拍照
+ * @brief 请求拍照一次
  *
  * 该接口仅置位“待拍照”标志，真正的拍照会在摄像头任务拿到下一帧 YUV420 图像时提交给后台任务。
  */
-void media_storage_request_auto_photo(void);
+esp_err_t media_storage_request_photo(void);
 
 /**
  * @brief 开始录像
@@ -93,9 +93,9 @@ void media_storage_start_video_record(void);
 void media_storage_stop_video_record(void);
 
 /**
- * @brief 用当前摄像头帧尝试提交自动拍照
+ * @brief 用当前摄像头帧尝试处理待执行的拍照请求
  *
- * 该函数只在有待拍照请求且后台空闲时拷贝一帧图像，PPA 转换、JPEG 硬件编码和写卡均由后台任务执行。
+ * 该函数只在收到拍照请求且后台空闲时拷贝一帧图像，PPA 转换、JPEG 硬件编码和写卡均由后台任务执行。
  *
  * @param yuv420_buf  YUV420 原始图像指针
  * @param yuv420_len  图像长度，字节；为 0 时按 width * height * 3 / 2 计算

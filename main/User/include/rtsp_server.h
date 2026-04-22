@@ -69,6 +69,11 @@ typedef struct {
 void rtsp_set_playing_callback(rtsp_playing_cb_t cb);
 
 /**
+ * @brief 获取当前处于播放状态的 RTSP 客户端数量
+ */
+uint32_t rtsp_get_active_client_count(void);
+
+/**
  * @brief 读取并清零当前 RTSP 实际发送统计
  *
  * 统计按帧时间戳去重，同一帧即使发给多个客户端，也只统计为 1 帧。

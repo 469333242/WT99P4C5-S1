@@ -8,6 +8,8 @@
  *   - GET /api/photos       : 照片列表 JSON
  *   - GET /api/videos       : 视频列表 JSON
  *   - GET /api/time         : 浏览器/电脑时间同步
+ *   - POST /api/capture     : 请求拍照一次
+ *   - POST /api/delete      : 删除一个或多个媒体文件
  *   - GET /photo/<path>     : JPEG 原图访问
  *   - GET /video/<path>     : MP4 视频访问，支持 Range 字节请求
  */

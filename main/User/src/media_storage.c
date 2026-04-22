@@ -68,7 +68,6 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_MAX_PATH_LEN            192
 #define MEDIA_STORAGE_DATE_TAG_LEN            9
 #define MEDIA_STORAGE_TIMESTAMP_LEN           32
-#define MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES  15
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN         60
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_1080P   12
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    30
@@ -109,9 +108,9 @@ typedef struct {
 typedef struct {
     bool                  initialized;
     bool                  session_ready;
-    bool                  auto_photo_pending;
+    bool                  photo_pending;
     bool                  photo_job_busy;
-    uint32_t              auto_photo_skip_frames;
+    uint32_t              photo_skip_frames;
 
     TaskHandle_t          photo_task_handle;
     ppa_client_handle_t   ppa_client;
@@ -398,11 +397,11 @@ static bool media_storage_try_take_photo_request(void)
     bool accepted = false;
 
     portENTER_CRITICAL(&s_media_lock);
-    if (s_media.initialized && s_media.auto_photo_pending && !s_media.photo_job_busy) {
-        if (s_media.auto_photo_skip_frames > 0U) {
-            s_media.auto_photo_skip_frames--;
+    if (s_media.initialized && s_media.photo_pending && !s_media.photo_job_busy) {
+        if (s_media.photo_skip_frames > 0U) {
+            s_media.photo_skip_frames--;
         } else {
-            s_media.auto_photo_pending = false;
+            s_media.photo_pending = false;
             s_media.photo_job_busy = true;
             accepted = true;
         }
@@ -423,7 +422,7 @@ static void media_storage_cancel_photo_job(bool retry)
     portENTER_CRITICAL(&s_media_lock);
     s_media.photo_job_busy = false;
     if (retry) {
-        s_media.auto_photo_pending = true;
+        s_media.photo_pending = true;
     }
     portEXIT_CRITICAL(&s_media_lock);
 }
@@ -1107,7 +1106,7 @@ static void media_storage_photo_task(void *arg)
         char file_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
 
         if (!tf_card_is_mounted()) {
-            ESP_LOGW(TAG, "TF 卡未挂载，跳过本次自动拍照");
+            ESP_LOGW(TAG, "TF 卡未挂载，跳过本次拍照任务");
             media_storage_finish_photo_job();
             continue;
         }
@@ -1881,25 +1880,46 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
     return ESP_OK;
 }
 
-void media_storage_request_auto_photo(void)
+esp_err_t media_storage_request_photo(void)
 {
     esp_err_t ret;
+    bool accepted = false;
 
     if (!s_media.initialized) {
-        return;
+        ESP_LOGW(TAG, "媒体存储模块未初始化，拒绝拍照请求");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!tf_card_is_mounted()) {
+        ESP_LOGW(TAG, "TF 卡未挂载，拒绝拍照请求");
+        return ESP_ERR_INVALID_STATE;
     }
 
     portENTER_CRITICAL(&s_media_lock);
-    s_media.auto_photo_pending = true;
-    s_media.auto_photo_skip_frames = MEDIA_STORAGE_AUTO_PHOTO_SKIP_FRAMES;
+    if (!s_media.photo_pending && !s_media.photo_job_busy) {
+        s_media.photo_pending = true;
+        s_media.photo_skip_frames = 0;
+        accepted = true;
+    }
     portEXIT_CRITICAL(&s_media_lock);
+
+    if (!accepted) {
+        ESP_LOGW(TAG, "已有拍照任务正在处理中，忽略新的拍照请求");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     ret = media_storage_ensure_photo_task();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "photo task not ready yet: 0x%x", ret);
+        portENTER_CRITICAL(&s_media_lock);
+        s_media.photo_pending = false;
+        s_media.photo_skip_frames = 0;
+        portEXIT_CRITICAL(&s_media_lock);
+        ESP_LOGW(TAG, "拍照后台任务未就绪: 0x%x", ret);
+        return ret;
     }
 
-    ESP_LOGI(TAG, "auto photo requested, waiting next frame");
+    ESP_LOGI(TAG, "已收到拍照请求，等待下一帧图像");
+    return ESP_OK;
 }
 
 void media_storage_start_video_record(void)

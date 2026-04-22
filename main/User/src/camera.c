@@ -295,7 +295,6 @@ static void on_rtsp_playing(bool playing)
     if (playing) {
         ESP_LOGI(TAG, "客户端已连接，启动摄像头采集");
         rtsp_reset_tx_stats();
-        media_storage_request_auto_photo();
         media_storage_start_video_record();
         xEventGroupSetBits(s_cam_event, CAM_START_BIT);
     } else {

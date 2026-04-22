@@ -171,7 +171,7 @@ static void update_playing_count(int delta)
     }
 }
 
-static uint32_t get_active_client_count(void)
+uint32_t rtsp_get_active_client_count(void)
 {
     uint32_t active = 0;
 
@@ -179,7 +179,7 @@ static uint32_t get_active_client_count(void)
         return 0;
     }
 
-    if (xSemaphoreTake(s_clients_mutex, RTSP_TRY_LOCK_TICKS) == pdTRUE) {
+    if (xSemaphoreTake(s_clients_mutex, portMAX_DELAY) == pdTRUE) {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (s_clients[i].state == CLIENT_PLAYING) {
                 active++;
@@ -222,7 +222,7 @@ void rtsp_take_tx_stats(rtsp_tx_stats_t *stats)
     memset(&s_tx_stats, 0, sizeof(s_tx_stats));
     portEXIT_CRITICAL(&s_tx_stats_lock);
 
-    stats->active_clients = get_active_client_count();
+    stats->active_clients = rtsp_get_active_client_count();
 }
 
 static bool replace_cached_nalu_if_needed(uint8_t **dst, size_t *dst_len,
