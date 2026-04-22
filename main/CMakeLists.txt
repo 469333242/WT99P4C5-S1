@@ -23,6 +23,7 @@ idf_component_register(SRCS "hello_world_main.c"
                            esp_driver_uart
                            esp_driver_sdmmc
                            esp_h264
+                           esp_muxer
                            esp_eth
                            esp_timer
                            fatfs
