@@ -37,7 +37,7 @@
 #include "camera.h"
 #include "media_storage.h"
 #include "rtsp_server.h"
-#include "../../managed_components/espressif__esp_cam_sensor/sensors/ov5647/private_include/ov5647_settings.h"
+#include "../../../managed_components/espressif__esp_cam_sensor/sensors/ov5647/private_include/ov5647_settings.h"
 
 static const char *TAG = "camera";
 
@@ -360,7 +360,7 @@ static esp_err_t select_sensor_mode_for_profile(void)
     const esp_cam_sensor_format_t *target_sensor_fmt = NULL;
 
     if (ioctl(s_cam.fd, VIDIOC_G_SENSOR_FMT, &sensor_fmt) != 0) {
-        ESP_LOGE(TAG, "failed to read sensor format: errno=%d", errno);
+        ESP_LOGE(TAG, "读取传感器格式失败: errno=%d", errno);
         return ESP_FAIL;
     }
 
@@ -371,13 +371,13 @@ static esp_err_t select_sensor_mode_for_profile(void)
     target_sensor_fmt = get_target_ov5647_sensor_format(H264_WIDTH, H264_HEIGHT);
     if (target_sensor_fmt == NULL) {
         ESP_LOGE(TAG,
-                 "target sensor format %ux%u is not enabled in sdkconfig",
+                 "目标传感器格式 %ux%u 未在 sdkconfig 中启用",
                  H264_WIDTH, H264_HEIGHT);
         return ESP_ERR_NOT_SUPPORTED;
     }
 
     if (ioctl(s_cam.fd, VIDIOC_S_SENSOR_FMT, (void *)target_sensor_fmt) != 0) {
-        ESP_LOGE(TAG, "failed to switch sensor format: errno=%d", errno);
+        ESP_LOGE(TAG, "切换传感器格式失败: errno=%d", errno);
         return ESP_FAIL;
     }
 
@@ -628,7 +628,7 @@ esp_err_t camera_init(void)
         return ESP_FAIL;
     }
 
-    ESP_RETURN_ON_ERROR(select_sensor_mode_for_profile(), TAG, "failed to switch sensor format");
+    ESP_RETURN_ON_ERROR(select_sensor_mode_for_profile(), TAG, "切换传感器格式失败");
 
     /* 枚举所有支持的格式 */
     struct v4l2_fmtdesc fmtdesc;
@@ -747,15 +747,13 @@ esp_err_t camera_init(void)
     ESP_LOGI(TAG, "H.264 输出缓冲: %zu 字节 (%.1f MB)",
              s_cam.h264_out_buf_size, s_cam.h264_out_buf_size / (1024.0 * 1024.0));
 
-    /* 让 CSI/MMAP/H.264 主链路先拿到核心资源，再预分配 TF 旁路缓冲，降低大分辨率下的初始化失败概率。 */
-    esp_err_t media_ret = media_storage_prepare_photo_buffers(s_cam.width, s_cam.height);
+    /*
+     * 1280x960 下照片链路会额外占用约 6.7 MB 缓冲。
+     * 启动阶段优先保证 RTSP 和录像旁路初始化成功，照片缓冲改为按需申请。
+     */
+    esp_err_t media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
     if (media_ret != ESP_OK) {
-        ESP_LOGW(TAG, "照片缓冲预分配失败，自动拍照将跳过或延后: 0x%x", media_ret);
-    }
-
-    media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
-    if (media_ret != ESP_OK) {
-        ESP_LOGW(TAG, "video record prepare failed, RTSP keeps running: 0x%x", media_ret);
+        ESP_LOGW(TAG, "录像保存缓冲准备失败，RTSP 将继续运行: 0x%x", media_ret);
     }
 
     ESP_LOGI(TAG, "H.264 编码器初始化完成: %"PRIu32"x%"PRIu32"@%dfps, GOP=%d, 码率=%"PRIu32" bps",

@@ -88,8 +88,8 @@ TCP <设备IP>:8881
 
 对应入口在：
 
-- `main/User/camera.c`
-- `main/User/media_storage.c`
+- `main/User/src/camera.c`
+- `main/User/src/media_storage.c`
 
 ## 4. MP4 封装是怎么进行的
 
@@ -105,7 +105,7 @@ TCP <设备IP>:8881
 - 一个 sample 对应一个 chunk，简化 `stsc/stco` 组织。
 - `moov` 只在正常关闭文件时补写，因此异常掉电时当前段可能不可播放。
 
-这些设计都在 `main/User/media_mp4_writer.c` 中实现。
+这些设计都在 `main/User/src/media_mp4_writer.c` 中实现。
 
 ### 4.2 录像触发与旁路入队
 
@@ -124,8 +124,8 @@ TCP <设备IP>:8881
 
 对应位置：
 
-- `main/User/camera.c`
-- `main/User/media_storage.c`
+- `main/User/src/camera.c`
+- `main/User/src/media_storage.c`
 
 ### 4.3 后台录像任务何时真正开段
 
@@ -218,11 +218,11 @@ TCP <设备IP>:8881
 
 ### 4.7 MP4 封装相关源码位置
 
-- `main/User/media_storage.c`
+- `main/User/src/media_storage.c`
   - 负责录像请求、H.264 旁路入队、分段开关、异常丢帧续写策略
-- `main/User/media_mp4_writer.c`
+- `main/User/src/media_mp4_writer.c`
   - 负责 MP4 box 组织、sample 写入、索引表生成、文件收尾
-- `main/User/media_mp4_writer.h`
+- `main/User/include/media_mp4_writer.h`
   - MP4 writer 配置与对外接口
 
 ## 5. 照片保存链路
@@ -247,14 +247,14 @@ YUV420 相机帧
 
 主要代码位置：
 
-- `main/User/media_storage.c`
+- `main/User/src/media_storage.c`
 
 ## 6. 媒体网页接口
 
 当前网页模块位于：
 
-- `main/User/photo_web_server.c`
-- `main/User/photo_web_server.h`
+- `main/User/src/photo_web_server.c`
+- `main/User/include/photo_web_server.h`
 
 已实现接口如下：
 
@@ -278,6 +278,16 @@ HEAD /video/*      返回 MP4 头信息，支持视频在线播放
 - 选择并删除媒体文件
 
 ## 7. 目录结构与命名规则
+
+代码目录在本次整理后拆分为：
+
+```text
+main/
+  hello_world_main.c
+  User/
+    include/   # 对外头文件
+    src/       # 模块实现
+```
 
 照片和视频共用同一次上电会话目录，典型结构如下：
 
@@ -304,19 +314,19 @@ HEAD /video/*      返回 MP4 头信息，支持视频在线播放
 
 - `main/hello_world_main.c`
   - 系统启动入口，负责初始化网络、TF 卡、媒体模块、网页和 RTSP。
-- `main/User/camera.c`
+- `main/User/src/camera.c`
   - 摄像头采集、ISP 格式切换、H.264 编码、RTSP 推流、媒体旁路触发。
-- `main/User/media_storage.c`
+- `main/User/src/media_storage.c`
   - 照片/视频存储主逻辑，后台任务、缓冲管理、分段控制、文件路径生成。
-- `main/User/media_mp4_writer.c`
+- `main/User/src/media_mp4_writer.c`
   - MP4 封装实现。
-- `main/User/photo_web_server.c`
+- `main/User/src/photo_web_server.c`
   - TF 卡媒体网页和接口。
-- `main/User/tf_card.c`
+- `main/User/src/tf_card.c`
   - TF 卡挂载与状态检测。
-- `main/User/rtsp_server.c`
+- `main/User/src/rtsp_server.c`
   - RTSP/RTP 服务。
-- `main/User/tcp_uart_server.c`
+- `main/User/src/tcp_uart_server.c`
   - TCP-UART 透传。
 
 ## 9. 启动顺序
@@ -336,7 +346,7 @@ HEAD /video/*      返回 MP4 头信息，支持视频在线播放
 
 ## 10. 分辨率与配置
 
-`main/User/camera.c` 里当前保留了多组 profile，包含：
+`main/User/src/camera.c` 里当前保留了多组 profile，包含：
 
 - `1280x960`
 - `1920x1080`

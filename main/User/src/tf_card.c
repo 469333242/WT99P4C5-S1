@@ -261,8 +261,8 @@ esp_err_t tf_card_init(void)
         .format_if_mount_failed = false,
         .max_files = TF_CARD_MAX_OPEN_FILES,
         .allocation_unit_size = TF_CARD_ALLOC_UNIT_SIZE,
-        .disk_status_check_enable = true,
-        .use_one_fat = false,
+        .disk_status_check_enable = false,
+        .use_one_fat = true,
     };
 
     ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");

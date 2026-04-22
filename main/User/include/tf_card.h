@@ -28,7 +28,7 @@ extern "C" {
 #define TF_CARD_CD_PIN                  GPIO_NUM_NC
 #define TF_CARD_WP_PIN                  GPIO_NUM_NC
 #define TF_CARD_BUS_WIDTH               4
-#define TF_CARD_MAX_FREQ_KHZ            SDMMC_FREQ_DEFAULT
+#define TF_CARD_MAX_FREQ_KHZ            SDMMC_FREQ_HIGHSPEED
 #define TF_CARD_IO_VOLTAGE_MV           3300
 #define TF_CARD_ENABLE_INTERNAL_PULLUP  1
 #define TF_CARD_LDO_CHANNEL_ID          4
@@ -38,7 +38,7 @@ extern "C" {
 
 /* 驱动参数 */
 #define TF_CARD_MAX_OPEN_FILES              8
-#define TF_CARD_ALLOC_UNIT_SIZE             (16 * 1024)
+#define TF_CARD_ALLOC_UNIT_SIZE             (64 * 1024)
 #define TF_CARD_SPEED_TEST_BUFFER_SIZE      (64 * 1024)
 #define TF_CARD_SPEED_TEST_FILE_SIZE        (4 * 1024 * 1024)
 #define TF_CARD_SPEED_TEST_MIN_FILE_SIZE    (1 * 1024 * 1024)

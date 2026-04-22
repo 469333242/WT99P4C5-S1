@@ -1,13 +1,13 @@
 idf_component_register(SRCS "hello_world_main.c"
-                             "User/wifi_connect.c"
-                             "User/camera.c"
-                             "User/media_storage.c"
-                             "User/media_mp4_writer.c"
-                             "User/photo_web_server.c"
-                             "User/rtsp_server.c"
-                             "User/tcp_uart_server.c"
-                             "User/eth_connect.c"
-                             "User/tf_card.c"
+                             "User/src/wifi_connect.c"
+                             "User/src/camera.c"
+                             "User/src/media_storage.c"
+                             "User/src/media_mp4_writer.c"
+                             "User/src/photo_web_server.c"
+                             "User/src/rtsp_server.c"
+                             "User/src/tcp_uart_server.c"
+                             "User/src/eth_connect.c"
+                             "User/src/tf_card.c"
                        PRIV_REQUIRES
                            spi_flash
                            esp_wifi
@@ -27,5 +27,5 @@ idf_component_register(SRCS "hello_world_main.c"
                            esp_timer
                            fatfs
                            sdmmc
-                       INCLUDE_DIRS "User"
+                       INCLUDE_DIRS "User/include"
 )

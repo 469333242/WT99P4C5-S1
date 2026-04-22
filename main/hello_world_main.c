@@ -2,7 +2,7 @@
  * @file hello_world_main.c
  * @brief 应用程序主入口
  *
- * 负责系统初始化与各模块启动，具体实现均在 User/ 目录下：
+ * 负责系统初始化与各模块启动，具体实现位于 User/src 与 User/include 目录：
  *   - wifi_connect     : WiFi STA 连接（通过 ESP32-C5 SDIO 协处理器）
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
