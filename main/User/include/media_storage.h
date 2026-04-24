@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,6 +21,32 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define ESP_ERR_MEDIA_STORAGE_BASE         0x7200
+#define ESP_ERR_MEDIA_STORAGE_TF_FULL      (ESP_ERR_MEDIA_STORAGE_BASE + 1)
+
+#define MEDIA_STORAGE_TF_STATUS_TEXT_LEN 96
+
+typedef struct {
+    bool     tf_mounted;
+    bool     tf_card_ok;
+    bool     tf_full;
+    bool     tf_overwriting_old_video;
+    bool     tf_can_capture;
+    bool     tf_can_start_record;
+    bool     tf_speed_test_valid;
+    bool     tf_speed_too_low;
+    bool     tf_speed_test_skipped;
+    uint64_t tf_total_bytes;
+    uint64_t tf_free_bytes;
+    uint64_t tf_used_bytes;
+    uint32_t tf_est_record_seconds;
+    uint32_t tf_est_photo_count;
+    uint32_t tf_write_speed_kbps;
+    uint32_t tf_read_speed_kbps;
+    char     tf_status_text[MEDIA_STORAGE_TF_STATUS_TEXT_LEN];
+    char     tf_speed_text[MEDIA_STORAGE_TF_STATUS_TEXT_LEN];
+} media_storage_tf_status_t;
 
 /**
  * @brief 初始化媒体存储模块
@@ -42,6 +69,16 @@ esp_err_t media_storage_init(void);
  * @return ESP_OK 同步成功，其它错误码表示时间非法或设置失败
  */
 esp_err_t media_storage_sync_time_from_unix_ms(int64_t unix_ms);
+
+/**
+ * @brief 读取当前 TF 卡与媒体存储状态
+ *
+ * @param run_speed_test  true 表示本次允许执行 TF 卡测速；录像中会自动跳过测速
+ * @param out_status      输出状态结构体
+ * @return ESP_OK 成功；其余错误表示状态读取失败
+ */
+esp_err_t media_storage_get_tf_status(bool run_speed_test,
+                                      media_storage_tf_status_t *out_status);
 
 /**
  * @brief 反初始化媒体存储模块

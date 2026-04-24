@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,6 +88,11 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_MASK    0x1F
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_SPS     7
 #define MEDIA_STORAGE_VIDEO_NALU_TYPE_PPS     8
+#define MEDIA_STORAGE_TF_MIN_PHOTO_FREE_BYTES      (2ULL * 1024ULL * 1024ULL)
+#define MEDIA_STORAGE_TF_MIN_VIDEO_START_FREE_BYTES (12ULL * 1024ULL * 1024ULL)
+#define MEDIA_STORAGE_TF_MIN_VIDEO_RESUME_FREE_BYTES (16ULL * 1024ULL * 1024ULL)
+#define MEDIA_STORAGE_TF_VIDEO_START_GUARD_SEC     15ULL
+#define MEDIA_STORAGE_TF_VIDEO_RESUME_GUARD_SEC    20ULL
 
 /* ------------------------------------------------------------------ */
 /* 内部类型                                                            */
@@ -119,6 +125,7 @@ typedef struct {
 
     uint32_t              session_seq;
     uint32_t              photo_count;
+    uint64_t              photo_avg_size_bytes;
     char                  session_date_tag[MEDIA_STORAGE_DATE_TAG_LEN];
     char                  session_root_dir[MEDIA_STORAGE_MAX_PATH_LEN];
     char                  photo_dir[MEDIA_STORAGE_MAX_PATH_LEN];
@@ -137,6 +144,8 @@ typedef struct {
 
     bool                  video_prepared;
     bool                  video_record_requested;
+    bool                  video_overwrite_allowed;
+    bool                  tf_overwriting_old_video;
     bool                  video_gap_pending;
     bool                  video_save_current_gop;
     TaskHandle_t          video_task_handle;
@@ -149,6 +158,7 @@ typedef struct {
     uint32_t              video_height;
     uint32_t              video_fps;
     uint32_t              video_sample_duration;
+    uint64_t              video_avg_bytes_per_sec;
     media_mp4_writer_t    video_writer;
     uint8_t              *video_sps;
     size_t                video_sps_len;
@@ -175,6 +185,8 @@ static portMUX_TYPE s_media_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void media_storage_photo_task(void *arg);
 static void media_storage_video_task(void *arg);
+static esp_err_t media_storage_join_path(char *dst, size_t dst_size,
+                                         const char *dir, const char *name);
 
 /* ------------------------------------------------------------------ */
 /* 通用工具                                                            */
@@ -265,6 +277,387 @@ static esp_err_t media_storage_copy_text(char *dst, size_t dst_size, const char 
 
     dst[0] = '\0';
     return media_storage_append_text(dst, dst_size, &offset, text);
+}
+
+static uint64_t media_storage_max_u64(uint64_t left, uint64_t right)
+{
+    return (left > right) ? left : right;
+}
+
+static bool media_storage_is_errno_no_space(int err_no)
+{
+    if (err_no == ENOSPC) {
+        return true;
+    }
+#ifdef EDQUOT
+    if (err_no == EDQUOT) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+static uint64_t media_storage_default_photo_size_bytes(void)
+{
+    uint32_t width = s_media.frame_width;
+    uint32_t height = s_media.frame_height;
+    uint64_t pixels;
+
+    if (width == 0U || height == 0U) {
+        width = s_media.video_width;
+        height = s_media.video_height;
+    }
+    if (width == 0U || height == 0U) {
+        return 512ULL * 1024ULL;
+    }
+
+    pixels = (uint64_t)width * (uint64_t)height;
+    return media_storage_max_u64(256ULL * 1024ULL, pixels / 4ULL);
+}
+
+static uint64_t media_storage_default_video_bytes_per_sec(void)
+{
+    uint64_t pixels = (uint64_t)s_media.video_width * (uint64_t)s_media.video_height;
+
+    if (pixels >= (uint64_t)1920U * 1080U) {
+        return 450ULL * 1024ULL;
+    }
+    if (pixels >= (uint64_t)1280U * 960U) {
+        return 320ULL * 1024ULL;
+    }
+    if (pixels >= (uint64_t)800U * 800U) {
+        return 220ULL * 1024ULL;
+    }
+    if (pixels >= (uint64_t)800U * 640U) {
+        return 180ULL * 1024ULL;
+    }
+    return 256ULL * 1024ULL;
+}
+
+static uint64_t media_storage_get_photo_estimate_bytes(void)
+{
+    if (s_media.photo_avg_size_bytes > 0ULL) {
+        return s_media.photo_avg_size_bytes;
+    }
+    return media_storage_default_photo_size_bytes();
+}
+
+static uint64_t media_storage_get_video_estimate_bytes_per_sec(void)
+{
+    if (s_media.video_avg_bytes_per_sec > 0ULL) {
+        return s_media.video_avg_bytes_per_sec;
+    }
+    return media_storage_default_video_bytes_per_sec();
+}
+
+static uint64_t media_storage_get_photo_min_free_bytes(void)
+{
+    return media_storage_max_u64(MEDIA_STORAGE_TF_MIN_PHOTO_FREE_BYTES,
+                                 media_storage_get_photo_estimate_bytes() * 2ULL);
+}
+
+static uint64_t media_storage_get_video_start_min_free_bytes(void)
+{
+    return media_storage_max_u64(MEDIA_STORAGE_TF_MIN_VIDEO_START_FREE_BYTES,
+                                 media_storage_get_video_estimate_bytes_per_sec() *
+                                 MEDIA_STORAGE_TF_VIDEO_START_GUARD_SEC);
+}
+
+static uint64_t media_storage_get_video_resume_min_free_bytes(void)
+{
+    return media_storage_max_u64(MEDIA_STORAGE_TF_MIN_VIDEO_RESUME_FREE_BYTES,
+                                 media_storage_get_video_estimate_bytes_per_sec() *
+                                 MEDIA_STORAGE_TF_VIDEO_RESUME_GUARD_SEC);
+}
+
+static bool media_storage_can_capture_with_info(const tf_card_info_t *info)
+{
+    return info && info->mounted && info->card_ok &&
+           info->free_bytes >= media_storage_get_photo_min_free_bytes();
+}
+
+static bool media_storage_can_start_record_with_info(const tf_card_info_t *info)
+{
+    return info && info->mounted && info->card_ok &&
+           info->free_bytes >= media_storage_get_video_start_min_free_bytes();
+}
+
+static bool media_storage_can_resume_record_with_info(const tf_card_info_t *info)
+{
+    return info && info->mounted && info->card_ok &&
+           info->free_bytes >= media_storage_get_video_resume_min_free_bytes();
+}
+
+static void media_storage_set_video_overwrite_allowed(bool enabled)
+{
+    portENTER_CRITICAL(&s_media_lock);
+    s_media.video_overwrite_allowed = enabled;
+    portEXIT_CRITICAL(&s_media_lock);
+}
+
+static bool media_storage_is_video_overwrite_allowed(void)
+{
+    bool enabled;
+
+    portENTER_CRITICAL(&s_media_lock);
+    enabled = s_media.video_overwrite_allowed;
+    portEXIT_CRITICAL(&s_media_lock);
+    return enabled;
+}
+
+static void media_storage_set_tf_overwriting_old_video(bool enabled)
+{
+    portENTER_CRITICAL(&s_media_lock);
+    s_media.tf_overwriting_old_video = enabled;
+    portEXIT_CRITICAL(&s_media_lock);
+}
+
+static bool media_storage_is_tf_overwriting_old_video(void)
+{
+    bool enabled;
+
+    portENTER_CRITICAL(&s_media_lock);
+    enabled = s_media.tf_overwriting_old_video;
+    portEXIT_CRITICAL(&s_media_lock);
+    return enabled;
+}
+
+static void media_storage_update_photo_average(size_t file_size)
+{
+    uint64_t size_bytes = (uint64_t)file_size;
+
+    if (size_bytes == 0ULL) {
+        return;
+    }
+    if (s_media.photo_avg_size_bytes == 0ULL) {
+        s_media.photo_avg_size_bytes = size_bytes;
+    } else {
+        s_media.photo_avg_size_bytes =
+            (s_media.photo_avg_size_bytes * 3ULL + size_bytes) / 4ULL;
+    }
+}
+
+static void media_storage_update_video_average(uint64_t file_size, uint32_t duration_ms)
+{
+    uint64_t bytes_per_sec;
+
+    if (file_size == 0ULL || duration_ms == 0U) {
+        return;
+    }
+
+    bytes_per_sec = (file_size * 1000ULL) / (uint64_t)duration_ms;
+    if (bytes_per_sec == 0ULL) {
+        return;
+    }
+
+    if (s_media.video_avg_bytes_per_sec == 0ULL) {
+        s_media.video_avg_bytes_per_sec = bytes_per_sec;
+    } else {
+        s_media.video_avg_bytes_per_sec =
+            (s_media.video_avg_bytes_per_sec * 3ULL + bytes_per_sec) / 4ULL;
+    }
+}
+
+static bool media_storage_parse_session_seq(const char *name, uint32_t *out_seq)
+{
+    const char *cursor = name;
+    uint32_t value = 0;
+
+    if (!name || !out_seq) {
+        return false;
+    }
+
+    while (*cursor >= '0' && *cursor <= '9') {
+        value = value * 10U + (uint32_t)(*cursor - '0');
+        cursor++;
+    }
+
+    if (cursor == name || *cursor != '_') {
+        return false;
+    }
+
+    *out_seq = value;
+    return true;
+}
+
+static bool media_storage_has_mp4_suffix(const char *name)
+{
+    size_t len;
+
+    if (!name) {
+        return false;
+    }
+
+    len = strlen(name);
+    return len >= 4U && strcasecmp(name + len - 4U, ".mp4") == 0;
+}
+
+static bool media_storage_is_dir(const char *path)
+{
+    struct stat st = {0};
+
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool media_storage_is_regular_file(const char *path, struct stat *out_st)
+{
+    struct stat st = {0};
+
+    if (!path || stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return false;
+    }
+
+    if (out_st) {
+        *out_st = st;
+    }
+    return true;
+}
+
+static bool media_storage_dir_is_empty(const char *path)
+{
+    DIR *dir = NULL;
+    struct dirent *entry = NULL;
+
+    if (!media_storage_is_dir(path)) {
+        return false;
+    }
+
+    dir = opendir(path);
+    if (!dir) {
+        return false;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            closedir(dir);
+            return false;
+        }
+    }
+
+    closedir(dir);
+    return true;
+}
+
+static void media_storage_try_remove_empty_dir(const char *path)
+{
+    if (!path || !media_storage_dir_is_empty(path)) {
+        return;
+    }
+
+    if (remove(path) != 0 && errno != ENOENT) {
+        ESP_LOGW(TAG, "删除空目录失败: %s, errno=%d", path, errno);
+    }
+}
+
+static esp_err_t media_storage_delete_oldest_video_file(char *deleted_path, size_t deleted_path_size)
+{
+    DIR *root_dir = NULL;
+    struct dirent *entry = NULL;
+    uint32_t selected_seq = UINT32_MAX;
+    char selected_session_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    char selected_video_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    char selected_file_name[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    char selected_file_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    bool found = false;
+
+    root_dir = opendir(tf_card_get_mount_point());
+    if (!root_dir) {
+        ESP_LOGW(TAG, "打开 TF 根目录失败，无法清理旧视频: errno=%d", errno);
+        return ESP_FAIL;
+    }
+
+    while ((entry = readdir(root_dir)) != NULL) {
+        char session_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+        char video_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+        DIR *video_dir_handle = NULL;
+        struct dirent *video_entry = NULL;
+        uint32_t session_seq = 0;
+        bool has_video = false;
+        char first_file_name[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+
+        if (entry->d_name[0] == '.' ||
+            !media_storage_parse_session_seq(entry->d_name, &session_seq)) {
+            continue;
+        }
+
+        if (media_storage_join_path(session_dir, sizeof(session_dir),
+                                    tf_card_get_mount_point(), entry->d_name) != ESP_OK ||
+            media_storage_join_path(video_dir, sizeof(video_dir),
+                                    session_dir, MEDIA_STORAGE_VIDEO_SUBDIR) != ESP_OK ||
+            !media_storage_is_dir(video_dir)) {
+            continue;
+        }
+
+        video_dir_handle = opendir(video_dir);
+        if (!video_dir_handle) {
+            continue;
+        }
+
+        while ((video_entry = readdir(video_dir_handle)) != NULL) {
+            if (!media_storage_has_mp4_suffix(video_entry->d_name)) {
+                continue;
+            }
+            if (!has_video || strcmp(video_entry->d_name, first_file_name) < 0) {
+                if (media_storage_copy_text(first_file_name, sizeof(first_file_name),
+                                            video_entry->d_name) != ESP_OK) {
+                    ESP_LOGW(TAG, "视频文件名过长，已跳过: %s", video_entry->d_name);
+                    continue;
+                }
+                has_video = true;
+            }
+        }
+        closedir(video_dir_handle);
+
+        if (!has_video) {
+            media_storage_try_remove_empty_dir(video_dir);
+            media_storage_try_remove_empty_dir(session_dir);
+            continue;
+        }
+
+        if (!found || session_seq < selected_seq ||
+            (session_seq == selected_seq && strcmp(first_file_name, selected_file_name) < 0)) {
+            selected_seq = session_seq;
+            if (media_storage_copy_text(selected_session_dir, sizeof(selected_session_dir),
+                                        session_dir) != ESP_OK ||
+                media_storage_copy_text(selected_video_dir, sizeof(selected_video_dir),
+                                        video_dir) != ESP_OK ||
+                media_storage_copy_text(selected_file_name, sizeof(selected_file_name),
+                                        first_file_name) != ESP_OK) {
+                ESP_LOGW(TAG, "旧视频路径过长，已跳过当前目录");
+                continue;
+            }
+            found = true;
+        }
+    }
+    closedir(root_dir);
+
+    if (!found) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_RETURN_ON_ERROR(media_storage_join_path(selected_file_path, sizeof(selected_file_path),
+                                                selected_video_dir, selected_file_name),
+                        TAG, "构建旧视频删除路径失败");
+
+    if (!media_storage_is_regular_file(selected_file_path, NULL)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (remove(selected_file_path) != 0) {
+        ESP_LOGW(TAG, "删除旧视频失败: %s, errno=%d", selected_file_path, errno);
+        return ESP_FAIL;
+    }
+
+    media_storage_try_remove_empty_dir(selected_video_dir);
+    media_storage_try_remove_empty_dir(selected_session_dir);
+
+    if (deleted_path && deleted_path_size > 0U) {
+        if (media_storage_copy_text(deleted_path, deleted_path_size,
+                                    selected_file_path) != ESP_OK) {
+            deleted_path[0] = '\0';
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t media_storage_join_path(char *dst, size_t dst_size,
@@ -879,6 +1272,148 @@ static esp_err_t media_storage_prepare_session(const char *date_tag)
     return ret;
 }
 
+static esp_err_t media_storage_reclaim_space_for_record(tf_card_info_t *out_info)
+{
+    tf_card_info_t info = {0};
+    esp_err_t ret;
+    bool deleted_any = false;
+
+    ret = tf_card_get_info(&info);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    while (!media_storage_can_resume_record_with_info(&info)) {
+        char deleted_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+
+        ret = media_storage_delete_oldest_video_file(deleted_path, sizeof(deleted_path));
+        if (ret != ESP_OK) {
+            if (deleted_any) {
+                ESP_LOGW(TAG, "TF 卡已满，但没有更多旧视频可删除，无法继续录像");
+            }
+            if (out_info) {
+                *out_info = info;
+            }
+            return ret;
+        }
+
+        deleted_any = true;
+        media_storage_set_tf_overwriting_old_video(true);
+        ESP_LOGW(TAG, "TF 卡已满，已删除旧视频继续录像: %s", deleted_path);
+
+        ret = tf_card_get_info(&info);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (out_info) {
+        *out_info = info;
+    }
+    return ESP_OK;
+}
+
+esp_err_t media_storage_get_tf_status(bool run_speed_test,
+                                      media_storage_tf_status_t *out_status)
+{
+    media_storage_tf_status_t status = {0};
+    tf_card_info_t info = {0};
+    tf_card_speed_test_result_t speed = {0};
+    esp_err_t ret;
+
+    if (!out_status) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = tf_card_get_info(&info);
+    if (ret == ESP_OK) {
+        status.tf_mounted = info.mounted;
+        status.tf_card_ok = info.card_ok;
+        status.tf_total_bytes = info.total_bytes;
+        status.tf_free_bytes = info.free_bytes;
+        status.tf_used_bytes = (info.total_bytes > info.free_bytes) ?
+                               (info.total_bytes - info.free_bytes) : 0ULL;
+        status.tf_can_capture = media_storage_can_capture_with_info(&info);
+        status.tf_can_start_record = media_storage_can_start_record_with_info(&info);
+        status.tf_est_photo_count = (uint32_t)(info.free_bytes /
+                                  media_storage_max_u64(1ULL, media_storage_get_photo_estimate_bytes()));
+        status.tf_est_record_seconds = (uint32_t)(info.free_bytes /
+                                     media_storage_max_u64(1ULL, media_storage_get_video_estimate_bytes_per_sec()));
+    } else {
+        status.tf_mounted = false;
+        status.tf_card_ok = false;
+        status.tf_can_capture = false;
+        status.tf_can_start_record = false;
+    }
+
+    if (run_speed_test) {
+        if (media_storage_is_video_record_requested()) {
+            status.tf_speed_test_skipped = true;
+            snprintf(status.tf_speed_text, sizeof(status.tf_speed_text), "%s",
+                     "录像中，已跳过测速");
+            tf_card_get_last_speed_test(&speed);
+        } else {
+            ret = tf_card_run_speed_test(&speed);
+            if (ret != ESP_OK) {
+                tf_card_get_last_speed_test(&speed);
+                if (ret == ESP_ERR_NO_MEM) {
+                    snprintf(status.tf_speed_text, sizeof(status.tf_speed_text), "%s",
+                             "剩余空间不足，无法测速");
+                } else {
+                    snprintf(status.tf_speed_text, sizeof(status.tf_speed_text), "%s",
+                             "TF 卡测速失败");
+                }
+            }
+        }
+    } else {
+        tf_card_get_last_speed_test(&speed);
+    }
+
+    if (speed.valid) {
+        status.tf_speed_test_valid = true;
+        status.tf_write_speed_kbps = speed.write_speed_kbps;
+        status.tf_read_speed_kbps = speed.read_speed_kbps;
+        status.tf_speed_too_low = speed.write_speed_too_low || speed.read_speed_too_low;
+        if (status.tf_speed_text[0] == '\0') {
+            snprintf(status.tf_speed_text, sizeof(status.tf_speed_text),
+                     "写入 %" PRIu32 " KB/s，读取 %" PRIu32 " KB/s%s",
+                     speed.write_speed_kbps, speed.read_speed_kbps,
+                     status.tf_speed_too_low ? "，速度过慢" : "");
+        }
+    } else if (status.tf_speed_text[0] == '\0') {
+        snprintf(status.tf_speed_text, sizeof(status.tf_speed_text), "%s", "未执行测速");
+    }
+
+    status.tf_overwriting_old_video = media_storage_is_tf_overwriting_old_video();
+    status.tf_full = status.tf_mounted &&
+                     ((!status.tf_can_capture) ||
+                      (!status.tf_can_start_record) ||
+                      status.tf_overwriting_old_video);
+
+    if (!status.tf_mounted) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s", "TF 卡未挂载");
+    } else if (!status.tf_card_ok) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s", "TF 卡异常");
+    } else if (status.tf_overwriting_old_video) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s",
+                 "TF 卡已满，正在覆盖旧视频");
+    } else if (!status.tf_can_start_record && !status.tf_can_capture) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s",
+                 "TF 卡已满，无法拍照和启动新录像");
+    } else if (!status.tf_can_start_record) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s",
+                 "TF 卡剩余空间不足，无法启动新录像");
+    } else if (!status.tf_can_capture) {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s",
+                 "TF 卡剩余空间不足，无法拍照");
+    } else {
+        snprintf(status.tf_status_text, sizeof(status.tf_status_text), "%s", "TF 卡正常");
+    }
+
+    *out_status = status;
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* 照片链路                                                            */
 /* ------------------------------------------------------------------ */
@@ -1067,6 +1602,7 @@ static esp_err_t media_storage_encode_rgb565_to_jpeg(uint32_t width, uint32_t he
 static esp_err_t media_storage_write_file(const char *path, const uint8_t *data, size_t len)
 {
     FILE *fp = NULL;
+    int saved_errno = 0;
 
     if (!path || !data || len == 0U) {
         return ESP_ERR_INVALID_ARG;
@@ -1074,19 +1610,47 @@ static esp_err_t media_storage_write_file(const char *path, const uint8_t *data,
 
     fp = fopen(path, "wb");
     if (!fp) {
-        ESP_LOGE(TAG, "打开文件失败: %s, errno=%d", path, errno);
+        saved_errno = errno;
+        ESP_LOGE(TAG, "打开文件失败: %s, errno=%d", path, saved_errno);
+        if (media_storage_is_errno_no_space(saved_errno)) {
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
         return ESP_FAIL;
     }
 
     if (fwrite(data, 1, len, fp) != len) {
+        saved_errno = ferror(fp) ? errno : 0;
         fclose(fp);
         remove(path);
-        ESP_LOGE(TAG, "写入文件失败: %s, errno=%d", path, errno);
+        ESP_LOGE(TAG, "写入文件失败: %s, errno=%d", path, saved_errno);
+        if (media_storage_is_errno_no_space(saved_errno)) {
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
         return ESP_FAIL;
     }
 
-    fflush(fp);
-    fsync(fileno(fp));
+    if (fflush(fp) != 0) {
+        saved_errno = errno;
+        fclose(fp);
+        remove(path);
+        ESP_LOGE(TAG, "刷新文件失败: %s, errno=%d", path, saved_errno);
+        if (media_storage_is_errno_no_space(saved_errno)) {
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
+        return ESP_FAIL;
+    }
+
+    if (fsync(fileno(fp)) != 0) {
+        saved_errno = errno;
+        fclose(fp);
+        remove(path);
+        ESP_LOGE(TAG, "同步文件失败: %s, errno=%d", path, saved_errno);
+        if (media_storage_is_errno_no_space(saved_errno)) {
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
+        return ESP_FAIL;
+    }
+
     fclose(fp);
     return ESP_OK;
 }
@@ -1104,6 +1668,7 @@ static void media_storage_photo_task(void *arg)
         char date_tag[MEDIA_STORAGE_DATE_TAG_LEN] = {0};
         char timestamp[MEDIA_STORAGE_TIMESTAMP_LEN] = {0};
         char file_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+        tf_card_info_t tf_info = {0};
 
         if (!tf_card_is_mounted()) {
             ESP_LOGW(TAG, "TF 卡未挂载，跳过本次拍照任务");
@@ -1118,6 +1683,12 @@ static void media_storage_photo_task(void *arg)
             ret = media_storage_encode_rgb565_to_jpeg(width, height, &jpeg_len);
         }
         if (ret == ESP_OK) {
+            ret = tf_card_get_info(&tf_info);
+        }
+        if (ret == ESP_OK && !media_storage_can_capture_with_info(&tf_info)) {
+            ret = ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
+        if (ret == ESP_OK) {
             ret = media_storage_prepare_session(date_tag);
         }
         if (ret == ESP_OK) {
@@ -1130,8 +1701,11 @@ static void media_storage_photo_task(void *arg)
 
         if (ret == ESP_OK) {
             s_media.photo_count++;
+            media_storage_update_photo_average(jpeg_len);
             ESP_LOGI(TAG, "照片保存成功 | 次序=%03" PRIu32 " | 本次上电第 %" PRIu32 " 张 | 路径=%s",
                      s_media.session_seq, s_media.photo_count, file_path);
+        } else if (ret == ESP_ERR_MEDIA_STORAGE_TF_FULL) {
+            ESP_LOGW(TAG, "TF 卡剩余空间不足，本次拍照未保存");
         } else {
             ESP_LOGE(TAG, "照片保存失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         }
@@ -1202,6 +1776,8 @@ static void media_storage_free_video_buffers(void)
     s_media.video_sample_duration = 0;
     s_media.video_prepared = false;
     s_media.video_record_requested = false;
+    s_media.video_overwrite_allowed = false;
+    s_media.tf_overwriting_old_video = false;
     s_media.video_gap_pending = false;
     s_media.video_save_current_gop = false;
     s_media.video_drop_count = 0;
@@ -1212,6 +1788,7 @@ static void media_storage_free_video_buffers(void)
     s_media.video_last_idr_used_slots = 0;
     s_media.video_non_idr_frame_count = 0;
     s_media.video_last_drop_log_tick = 0;
+    s_media.video_avg_bytes_per_sec = 0ULL;
     media_storage_free_video_parameter_sets();
     media_storage_reset_video_segment_state();
 }
@@ -1354,13 +1931,13 @@ static void media_storage_update_video_parameter_sets(const uint8_t *h264_buf, s
             esp_err_t ret = media_storage_replace_nalu(&s_media.video_sps, &s_media.video_sps_len,
                                                        nalu, nalus[i].len);
             if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "update video SPS failed: 0x%x", ret);
+                ESP_LOGW(TAG, "更新视频 SPS 失败: 0x%x", ret);
             }
         } else if (nalus[i].type == MEDIA_STORAGE_VIDEO_NALU_TYPE_PPS) {
             esp_err_t ret = media_storage_replace_nalu(&s_media.video_pps, &s_media.video_pps_len,
                                                        nalu, nalus[i].len);
             if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "update video PPS failed: 0x%x", ret);
+                ESP_LOGW(TAG, "更新视频 PPS 失败: 0x%x", ret);
             }
         }
     }
@@ -1375,6 +1952,7 @@ static esp_err_t media_storage_video_open_segment(void)
     char tmp_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
     char final_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
     uint32_t segment_index = s_media.video_segment_index + 1U;
+    tf_card_info_t tf_info = {0};
 
     if (media_mp4_writer_is_open(&s_media.video_writer)) {
         return ESP_ERR_INVALID_STATE;
@@ -1396,6 +1974,27 @@ static esp_err_t media_storage_video_open_segment(void)
             ESP_LOGW(TAG, "录像等待 H.264 SPS/PPS 参数，暂不创建 MP4 分段");
         }
         return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = tf_card_get_info(&tf_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取 TF 卡状态失败，无法创建录像分段: 0x%x (%s)",
+                 ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (!media_storage_can_resume_record_with_info(&tf_info)) {
+        if (!media_storage_is_video_overwrite_allowed()) {
+            ESP_LOGW(TAG, "TF 卡剩余空间不足，禁止启动新录像");
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
+
+        ret = media_storage_reclaim_space_for_record(&tf_info);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "TF 卡已满，删除旧视频后仍无法继续录像: 0x%x (%s)",
+                     ret, esp_err_to_name(ret));
+            return ESP_ERR_MEDIA_STORAGE_TF_FULL;
+        }
     }
 
     media_storage_build_timestamp(date_tag, sizeof(date_tag), timestamp, sizeof(timestamp));
@@ -1451,6 +2050,7 @@ static esp_err_t media_storage_video_open_segment(void)
     s_media.video_segment_start_us = esp_timer_get_time();
     s_media.video_segment_frame_count = 0;
     s_media.video_switch_pending = false;
+    media_storage_set_video_overwrite_allowed(true);
 
     ESP_LOGI(TAG, "录像分段已创建 | 序号=%04" PRIu32 " | 临时文件=%s",
              s_media.video_segment_index, s_media.video_tmp_path);
@@ -1478,6 +2078,7 @@ static esp_err_t media_storage_video_close_segment(void)
     uint32_t frame_count = s_media.video_segment_frame_count;
     char tmp_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
     char final_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    uint32_t duration_ms = 0;
 
     if (!media_mp4_writer_is_open(&s_media.video_writer)) {
         media_storage_reset_video_segment_state();
@@ -1507,6 +2108,25 @@ static esp_err_t media_storage_video_close_segment(void)
         ESP_LOGE(TAG, "MP4 临时文件改名失败 | %s -> %s | errno=%d",
                  tmp_path, final_path, errno);
         return ESP_FAIL;
+    }
+
+    if (s_media.video_sample_duration > 0U) {
+        uint64_t duration_ms_u64 =
+            ((uint64_t)frame_count * (uint64_t)s_media.video_sample_duration * 1000ULL) /
+            (uint64_t)MEDIA_STORAGE_VIDEO_TIMESCALE;
+        if (duration_ms_u64 > UINT32_MAX) {
+            duration_ms = UINT32_MAX;
+        } else {
+            duration_ms = (uint32_t)duration_ms_u64;
+        }
+    }
+
+    if (duration_ms > 0U) {
+        struct stat st = {0};
+
+        if (stat(final_path, &st) == 0 && st.st_size > 0) {
+            media_storage_update_video_average((uint64_t)st.st_size, duration_ms);
+        }
     }
 
     ESP_LOGI(TAG, "录像保存成功 | 序号=%04" PRIu32 " | 帧数=%" PRIu32 " | 路径=%s",
@@ -1588,7 +2208,18 @@ static void media_storage_handle_video_frame(const media_storage_video_frame_t *
                                        s_media.video_segment_frame_count * s_media.video_sample_duration,
                                        is_idr);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "写入 MP4 帧失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        tf_card_info_t tf_info = {0};
+        bool tf_space_low = false;
+
+        if (tf_card_get_info(&tf_info) == ESP_OK) {
+            tf_space_low = !media_storage_can_resume_record_with_info(&tf_info);
+        }
+
+        if (tf_space_low) {
+            ESP_LOGW(TAG, "TF 卡空间不足，当前录像分段写入失败，等待下一帧 IDR 后尝试删除旧视频继续录像");
+        } else {
+            ESP_LOGE(TAG, "写入 MP4 帧失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        }
         media_storage_video_abort_segment();
         return;
     }
@@ -1868,7 +2499,7 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
         return ret;
     }
 
-    ESP_LOGI(TAG, "video buffers ready | %ux%u@%u | queue=%u/%u | frame_buf=%zu",
+    ESP_LOGI(TAG, "录像缓冲已准备 | %ux%u@%u | 队列=%u/%u | 帧缓冲=%zu",
              (unsigned)width, (unsigned)height, (unsigned)fps,
              (unsigned)s_media.video_slot_count,
              (unsigned)MEDIA_STORAGE_VIDEO_QUEUE_LEN, frame_buf_size);
@@ -1884,6 +2515,7 @@ esp_err_t media_storage_request_photo(void)
 {
     esp_err_t ret;
     bool accepted = false;
+    tf_card_info_t tf_info = {0};
 
     if (!s_media.initialized) {
         ESP_LOGW(TAG, "媒体存储模块未初始化，拒绝拍照请求");
@@ -1893,6 +2525,17 @@ esp_err_t media_storage_request_photo(void)
     if (!tf_card_is_mounted()) {
         ESP_LOGW(TAG, "TF 卡未挂载，拒绝拍照请求");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    ret = tf_card_get_info(&tf_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取 TF 卡状态失败，拒绝拍照请求: 0x%x (%s)",
+                 ret, esp_err_to_name(ret));
+        return ret;
+    }
+    if (!media_storage_can_capture_with_info(&tf_info)) {
+        ESP_LOGW(TAG, "TF 卡剩余空间不足，拒绝拍照请求");
+        return ESP_ERR_MEDIA_STORAGE_TF_FULL;
     }
 
     portENTER_CRITICAL(&s_media_lock);
@@ -1927,6 +2570,7 @@ void media_storage_start_video_record(void)
     esp_err_t ret;
     bool need_log = false;
     bool prepared = false;
+    tf_card_info_t tf_info = {0};
 
     if (!s_media.initialized) {
         return;
@@ -1937,11 +2581,24 @@ void media_storage_start_video_record(void)
         return;
     }
 
+    ret = tf_card_get_info(&tf_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取 TF 卡状态失败，忽略录像请求: 0x%x (%s)",
+                 ret, esp_err_to_name(ret));
+        return;
+    }
+    if (!media_storage_can_start_record_with_info(&tf_info)) {
+        ESP_LOGW(TAG, "TF 卡剩余空间不足，拒绝启动新录像");
+        return;
+    }
+
     prepared = s_media.video_prepared;
     if (!prepared) {
         portENTER_CRITICAL(&s_media_lock);
         if (!s_media.video_record_requested) {
             s_media.video_record_requested = true;
+            s_media.video_overwrite_allowed = false;
+            s_media.tf_overwriting_old_video = false;
             s_media.video_gap_pending = false;
             s_media.video_save_current_gop = false;
             s_media.video_save_gop_count = 0;
@@ -1962,13 +2619,15 @@ void media_storage_start_video_record(void)
 
     ret = media_storage_ensure_video_task();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "video task not ready yet: 0x%x", ret);
+        ESP_LOGW(TAG, "录像后台任务尚未就绪: 0x%x", ret);
         return;
     }
 
     portENTER_CRITICAL(&s_media_lock);
     if (!s_media.video_record_requested) {
         s_media.video_record_requested = true;
+        s_media.video_overwrite_allowed = false;
+        s_media.tf_overwriting_old_video = false;
         s_media.video_gap_pending = false;
         s_media.video_save_current_gop = false;
         s_media.video_save_gop_count = 0;
@@ -1997,13 +2656,15 @@ void media_storage_stop_video_record(void)
     portENTER_CRITICAL(&s_media_lock);
     if (s_media.video_record_requested) {
         s_media.video_record_requested = false;
+        s_media.video_overwrite_allowed = false;
+        s_media.tf_overwriting_old_video = false;
         s_media.video_save_current_gop = false;
         need_log = true;
     }
     portEXIT_CRITICAL(&s_media_lock);
 
     if (need_log) {
-        ESP_LOGI(TAG, "video record stopped, background will close MP4 segment");
+        ESP_LOGI(TAG, "录像请求已停止，后台将关闭当前 MP4 分段");
     }
 }
 

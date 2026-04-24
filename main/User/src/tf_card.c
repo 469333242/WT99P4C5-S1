@@ -369,6 +369,17 @@ esp_err_t tf_card_get_info(tf_card_info_t *out_info)
     return ret;
 }
 
+esp_err_t tf_card_get_last_speed_test(tf_card_speed_test_result_t *out_result)
+{
+    ESP_RETURN_ON_FALSE(out_result != NULL, ESP_ERR_INVALID_ARG, TAG, "TF 测速结果输出指针为空");
+    ESP_RETURN_ON_ERROR(tf_card_ensure_lock(), TAG, "初始化互斥锁失败");
+
+    xSemaphoreTake(s_tf.lock, portMAX_DELAY);
+    *out_result = s_tf.last_speed_test;
+    xSemaphoreGive(s_tf.lock);
+    return ESP_OK;
+}
+
 esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
 {
     esp_err_t ret;
@@ -485,11 +496,11 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
         *out_result = result;
     }
 
-    ESP_LOGI(TAG, "TF 卡测速完成 | 文件: %u 字节 | 写入: %u KB/s | 读取: %u KB/s",
+    ESP_LOGI(TAG, "TF 卡测速完成 | 文件: %" PRIu32 " 字节 | 写入: %" PRIu32 " KB/s | 读取: %" PRIu32 " KB/s",
              result.file_size_bytes, result.write_speed_kbps, result.read_speed_kbps);
     if (result.write_speed_too_low || result.read_speed_too_low) {
-        ESP_LOGW(TAG, "TF 卡速度低于阈值 | 写入阈值: %u KB/s | 读取阈值: %u KB/s",
-                 TF_CARD_MIN_WRITE_SPEED_KBPS, TF_CARD_MIN_READ_SPEED_KBPS);
+        ESP_LOGW(TAG, "TF 卡速度低于阈值 | 写入阈值: %" PRIu32 " KB/s | 读取阈值: %" PRIu32 " KB/s",
+                 (uint32_t)TF_CARD_MIN_WRITE_SPEED_KBPS, (uint32_t)TF_CARD_MIN_READ_SPEED_KBPS);
     }
 
     return ESP_OK;
@@ -519,7 +530,7 @@ void tf_card_log_status(void)
              info.sector_count, info.sector_size, info.real_freq_khz);
 
     if (speed.valid) {
-        ESP_LOGI(TAG, "TF 最近测速 | 写入: %u KB/s | 读取: %u KB/s | 低于阈值(写/读)=%d/%d",
+        ESP_LOGI(TAG, "TF 最近测速 | 写入: %" PRIu32 " KB/s | 读取: %" PRIu32 " KB/s | 低于阈值(写/读)=%d/%d",
                  speed.write_speed_kbps, speed.read_speed_kbps,
                  speed.write_speed_too_low, speed.read_speed_too_low);
     }

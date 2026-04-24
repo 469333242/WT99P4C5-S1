@@ -71,6 +71,7 @@ esp_err_t tf_card_deinit(void);
 bool tf_card_is_mounted(void);
 const char *tf_card_get_mount_point(void);
 esp_err_t tf_card_get_info(tf_card_info_t *out_info);
+esp_err_t tf_card_get_last_speed_test(tf_card_speed_test_result_t *out_result);
 esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result);
 void tf_card_log_status(void);
 

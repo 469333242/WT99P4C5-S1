@@ -56,6 +56,7 @@ static const char *TAG = "photo_web";
 #define PHOTO_WEB_HTTP_HEADER_LEN 512
 #define PHOTO_WEB_TIME_QUERY_LEN 96
 #define PHOTO_WEB_TIME_VALUE_LEN 24
+#define PHOTO_WEB_STATUS_QUERY_LEN 64
 #define PHOTO_WEB_DELETE_BODY_MAX_LEN 16384
 #define PHOTO_WEB_CONFIG_BODY_MAX_LEN 512
 #define PHOTO_WEB_STATUS_TEXT_LEN 64
@@ -273,29 +274,39 @@ static const char *s_photo_index_html_v6[] = {
     "    }\n",
     "    .statusList {\n",
     "      display: grid;\n",
-    "      gap: 10px;\n",
+    "      grid-template-columns: repeat(2, minmax(0, 1fr));\n",
+    "      gap: 10px 12px;\n",
     "    }\n",
     "    .statusRow {\n",
-    "      display: flex;\n",
-    "      align-items: flex-start;\n",
-    "      justify-content: space-between;\n",
+    "      display: grid;\n",
+    "      grid-template-columns: minmax(78px, 112px) minmax(0, 1fr);\n",
+    "      align-items: center;\n",
     "      gap: 12px;\n",
+    "      min-height: 50px;\n",
     "      padding: 10px 12px;\n",
     "      border: 1px solid var(--line);\n",
     "      border-radius: 16px;\n",
     "      background: rgba(255, 255, 255, .8);\n",
     "    }\n",
+    "    .statusRow.wide {\n",
+    "      grid-column: 1 / -1;\n",
+    "    }\n",
     "    .statusKey {\n",
     "      color: var(--muted);\n",
     "      font-size: 13px;\n",
     "      font-weight: 700;\n",
-    "      white-space: nowrap;\n",
+    "      line-height: 1.5;\n",
     "    }\n",
     "    .statusValue {\n",
     "      font-size: 13px;\n",
     "      font-weight: 700;\n",
     "      text-align: right;\n",
+    "      line-height: 1.6;\n",
     "      word-break: break-all;\n",
+    "    }\n",
+    "    .statusValue.noWrap {\n",
+    "      white-space: nowrap;\n",
+    "      word-break: normal;\n",
     "    }\n",
     "    .media {\n",
     "      display: grid;\n",
@@ -434,6 +445,11 @@ static const char *s_photo_index_html_v6[] = {
     "    @media (max-width: 760px) {\n",
     "      .shell { padding: 18px 12px 32px; }\n",
     "      .panel { padding: 14px; }\n",
+    "      .statusList { grid-template-columns: 1fr; }\n",
+    "      .statusRow,\n",
+    "      .statusRow.wide {\n",
+    "        grid-column: auto;\n",
+    "      }\n",
     "      .grid {\n",
     "        grid-template-columns: repeat(2, minmax(0, 1fr));\n",
     "        gap: 12px;\n",
@@ -483,12 +499,17 @@ static const char *s_photo_index_html_v6[] = {
     "          </div>\n",
     "        </div>\n",
     "        <div class='statusList'>\n",
-    "          <div class='statusRow'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue noWrap'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>当前 IP</div><div id='deviceCurrentIp' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>当前网关</div><div id='deviceCurrentGw' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>子网掩码</div><div id='deviceCurrentMask' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>RTSP 地址</div><div id='deviceRtspUrl' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow wide'><div class='statusKey'>RTSP 地址</div><div id='deviceRtspUrl' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow wide'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 总容量</div><div id='deviceTfTotal' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 剩余容量</div><div id='deviceTfFree' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>预估录像时长</div><div id='deviceTfRecordTime' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>预估拍照数量</div><div id='deviceTfPhotoCount' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 读写测速</div><div id='deviceTfSpeed' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>RTSP 客户端</div><div id='deviceRtspClients' class='statusValue'>0</div></div>\n",
     "        </div>\n",
     "        <div class='settingActions'>\n",
@@ -612,10 +633,17 @@ static const char *s_photo_index_html_v6[] = {
     "    const SECTION_KEYS = ['photo', 'video'];\n",
     "    const CAPTURE_RETRY_COUNT = 6;\n",
     "    const CAPTURE_RETRY_DELAY_MS = 500;\n",
+    "    const DEVICE_STATUS_REFRESH_MS = 15000;\n",
+    "    const DEVICE_CLOCK_TICK_MS = 1000;\n",
     "    const state = {\n",
     "      busy: false,\n",
     "      deviceConfig: null,\n",
     "      deviceStatus: null,\n",
+    "      deviceClockBaseMs: 0,\n",
+    "      deviceClockLocalMs: 0,\n",
+    "      deviceClockValid: false,\n",
+    "      deviceClockTimer: 0,\n",
+    "      deviceStatusTimer: 0,\n",
     "      photo: { title: '照片', unit: '张', empty: 'SD 卡中暂无照片', items: [], selected: new Set(), collapsed: false, selecting: false },\n",
     "      video: { title: '视频', unit: '段', empty: 'SD 卡中暂无视频', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
     "    };\n",
@@ -633,6 +661,11 @@ static const char *s_photo_index_html_v6[] = {
     "        currentMask: document.getElementById('deviceCurrentMask'),\n",
     "        rtspUrl: document.getElementById('deviceRtspUrl'),\n",
     "        tfStatus: document.getElementById('deviceTfStatus'),\n",
+    "        tfTotal: document.getElementById('deviceTfTotal'),\n",
+    "        tfFree: document.getElementById('deviceTfFree'),\n",
+    "        tfRecordTime: document.getElementById('deviceTfRecordTime'),\n",
+    "        tfPhotoCount: document.getElementById('deviceTfPhotoCount'),\n",
+    "        tfSpeed: document.getElementById('deviceTfSpeed'),\n",
     "        rtspClients: document.getElementById('deviceRtspClients'),\n",
     "        refreshStatusBtn: document.getElementById('refreshStatusBtn'),\n",
     "        syncTimeBtn: document.getElementById('syncTimeBtn'),\n",
@@ -669,16 +702,88 @@ static const char *s_photo_index_html_v6[] = {
     "      }\n",
     "    };\n",
     "    function formatSize(size) {\n",
-    "      if (!Number.isFinite(size) || size <= 0) {\n",
+    "      if (!Number.isFinite(size) || size < 0) {\n",
     "        return '--';\n",
     "      }\n",
     "      if (size < 1024) {\n",
-    "        return size + ' B';\n",
+    "        return Math.floor(size) + ' B';\n",
     "      }\n",
     "      if (size < 1024 * 1024) {\n",
     "        return (size / 1024).toFixed(1) + ' KB';\n",
     "      }\n",
-    "      return (size / 1024 / 1024).toFixed(2) + ' MB';\n",
+    "      if (size < 1024 * 1024 * 1024) {\n",
+    "        return (size / 1024 / 1024).toFixed(2) + ' MB';\n",
+    "      }\n",
+    "      if (size < 1024 * 1024 * 1024 * 1024) {\n",
+    "        return (size / 1024 / 1024 / 1024).toFixed(2) + ' GB';\n",
+    "      }\n",
+    "      return (size / 1024 / 1024 / 1024 / 1024).toFixed(2) + ' TB';\n",
+    "    }\n",
+    "    function padNumber(value, width) {\n",
+    "      return String(Math.max(0, Math.floor(Number(value) || 0))).padStart(width, '0');\n",
+    "    }\n",
+    "    function formatDateTime(unixMs) {\n",
+    "      if (!Number.isFinite(unixMs) || unixMs <= 0) {\n",
+    "        return '--';\n",
+    "      }\n",
+    "      const date = new Date(unixMs);\n",
+    "      return date.getFullYear() + '-' +\n",
+    "        padNumber(date.getMonth() + 1, 2) + '-' +\n",
+    "        padNumber(date.getDate(), 2) + ' ' +\n",
+    "        padNumber(date.getHours(), 2) + ':' +\n",
+    "        padNumber(date.getMinutes(), 2) + ':' +\n",
+    "        padNumber(date.getSeconds(), 2);\n",
+    "    }\n",
+    "    function formatDuration(seconds) {\n",
+    "      if (!Number.isFinite(seconds) || seconds < 0) {\n",
+    "        return '--';\n",
+    "      }\n",
+    "      const totalSeconds = Math.floor(seconds);\n",
+    "      const days = Math.floor(totalSeconds / 86400);\n",
+    "      const hours = Math.floor((totalSeconds % 86400) / 3600);\n",
+    "      const minutes = Math.floor((totalSeconds % 3600) / 60);\n",
+    "      const secs = totalSeconds % 60;\n",
+    "      const parts = [];\n",
+    "      if (days > 0) {\n",
+    "        parts.push(days + ' 天');\n",
+    "      }\n",
+    "      if (hours > 0) {\n",
+    "        parts.push(hours + ' 小时');\n",
+    "      }\n",
+    "      if (minutes > 0 && parts.length < 2) {\n",
+    "        parts.push(minutes + ' 分');\n",
+    "      }\n",
+    "      if (parts.length < 2 && (secs > 0 || parts.length === 0)) {\n",
+    "        parts.push(secs + ' 秒');\n",
+    "      }\n",
+    "      return parts.join(' ');\n",
+    "    }\n",
+    "    function formatPhotoCount(count) {\n",
+    "      if (!Number.isFinite(count) || count < 0) {\n",
+    "        return '--';\n",
+    "      }\n",
+    "      return Math.floor(count) + ' 张';\n",
+    "    }\n",
+    "    function updateDeviceClockBase(info) {\n",
+    "      const unixMs = Number(info.current_unix_ms);\n",
+    "      if (!!info.time_valid && Number.isFinite(unixMs) && unixMs > 0) {\n",
+    "        state.deviceClockBaseMs = unixMs;\n",
+    "        state.deviceClockLocalMs = Date.now();\n",
+    "        state.deviceClockValid = true;\n",
+    "      } else {\n",
+    "        state.deviceClockBaseMs = 0;\n",
+    "        state.deviceClockLocalMs = 0;\n",
+    "        state.deviceClockValid = false;\n",
+    "      }\n",
+    "    }\n",
+    "    function renderDeviceClock() {\n",
+    "      const info = state.deviceStatus || {};\n",
+    "      if (state.deviceClockValid) {\n",
+    "        const nowMs = state.deviceClockBaseMs + Math.max(0, Date.now() - state.deviceClockLocalMs);\n",
+    "        refs.device.currentTime.textContent = formatDateTime(nowMs);\n",
+    "        return;\n",
+    "      }\n",
+    "      refs.device.currentTime.textContent = info.current_time || '--';\n",
     "    }\n",
     "    function sortItems(items) {\n",
     "      return items.slice().sort((a, b) => String(b.path || '').localeCompare(String(a.path || '')));\n",
@@ -726,12 +831,19 @@ static const char *s_photo_index_html_v6[] = {
     "    }\n",
     "    function renderDeviceStatus() {\n",
     "      const info = state.deviceStatus || {};\n",
-    "      refs.device.currentTime.textContent = info.current_time || '--';\n",
+    "      const tfMounted = !!info.tf_mounted;\n",
+    "      updateDeviceClockBase(info);\n",
+    "      renderDeviceClock();\n",
     "      refs.device.currentIp.textContent = info.current_ip || '--';\n",
     "      refs.device.currentGw.textContent = info.current_gw || '--';\n",
     "      refs.device.currentMask.textContent = info.current_mask || '--';\n",
     "      refs.device.rtspUrl.textContent = info.rtsp_url || '--';\n",
-    "      refs.device.tfStatus.textContent = info.tf_mounted ? '已挂载' : '未挂载';\n",
+    "      refs.device.tfStatus.textContent = info.tf_status_text || (tfMounted ? '已挂载' : '未挂载');\n",
+    "      refs.device.tfTotal.textContent = tfMounted ? formatSize(Number(info.tf_total_bytes)) : '--';\n",
+    "      refs.device.tfFree.textContent = tfMounted ? formatSize(Number(info.tf_free_bytes)) : '--';\n",
+    "      refs.device.tfRecordTime.textContent = tfMounted ? formatDuration(Number(info.tf_est_record_seconds)) : '--';\n",
+    "      refs.device.tfPhotoCount.textContent = tfMounted ? formatPhotoCount(Number(info.tf_est_photo_count)) : '--';\n",
+    "      refs.device.tfSpeed.textContent = info.tf_speed_text || '--';\n",
     "      refs.device.rtspClients.textContent = String(Number(info.active_clients) || 0);\n",
     "    }\n",
     "    function renderDeviceConfig() {\n",
@@ -969,8 +1081,9 @@ static const char *s_photo_index_html_v6[] = {
     "      const data = await fetchJson(url);\n",
     "      return Array.isArray(data.items) ? data.items : [];\n",
     "    }\n",
-    "    async function fetchDeviceStatus() {\n",
-    "      return fetchJson('/api/status');\n",
+    "    async function fetchDeviceStatus(runSpeedTest) {\n",
+    "      const url = runSpeedTest ? '/api/status?run_speed_test=1' : '/api/status';\n",
+    "      return fetchJson(url);\n",
     "    }\n",
     "    async function fetchDeviceConfig() {\n",
     "      return fetchJson('/api/config');\n",
@@ -999,8 +1112,16 @@ static const char *s_photo_index_html_v6[] = {
     "    async function requestDeviceReboot() {\n",
     "      return fetchJson('/api/reboot', { method: 'POST' });\n",
     "    }\n",
-    "    async function refreshDevicePanel() {\n",
-    "      const results = await Promise.all([fetchDeviceStatus(), fetchDeviceConfig()]);\n",
+    "    async function refreshDeviceStatusPanel(runSpeedTest) {\n",
+    "      state.deviceStatus = await fetchDeviceStatus(!!runSpeedTest);\n",
+    "      renderDeviceStatus();\n",
+    "    }\n",
+    "    async function refreshDeviceConfigPanel() {\n",
+    "      state.deviceConfig = await fetchDeviceConfig();\n",
+    "      renderDeviceConfig();\n",
+    "    }\n",
+    "    async function refreshDevicePanel(runSpeedTest) {\n",
+    "      const results = await Promise.all([fetchDeviceStatus(!!runSpeedTest), fetchDeviceConfig()]);\n",
     "      state.deviceStatus = results[0];\n",
     "      state.deviceConfig = results[1];\n",
     "      renderDeviceStatus();\n",
@@ -1024,6 +1145,59 @@ static const char *s_photo_index_html_v6[] = {
     "        body: paths.join('\\n')\n",
     "      });\n",
     "    }\n",
+    "    function buildStatusRefreshMessage() {\n",
+    "      const info = state.deviceStatus || {};\n",
+    "      if (info.tf_speed_too_low) {\n",
+    "        return { text: info.tf_speed_text || 'TF 卡速度过慢', isError: true };\n",
+    "      }\n",
+    "      if (info.tf_speed_test_skipped) {\n",
+    "        return { text: info.tf_speed_text || '录像中，已跳过测速', isError: false };\n",
+    "      }\n",
+    "      if (info.tf_status_text && info.tf_status_text !== 'TF 卡正常') {\n",
+    "        return { text: info.tf_status_text, isError: true };\n",
+    "      }\n",
+    "      return { text: '设备状态已更新', isError: false };\n",
+    "    }\n",
+    "    async function refreshDeviceStatusQuietly() {\n",
+    "      if (state.busy || document.hidden) {\n",
+    "        return;\n",
+    "      }\n",
+    "      try {\n",
+    "        await refreshDeviceStatusPanel(false);\n",
+    "      } catch (error) {\n",
+    "      }\n",
+    "    }\n",
+    "    function stopDeviceStatusRefresh() {\n",
+    "      if (state.deviceStatusTimer) {\n",
+    "        window.clearInterval(state.deviceStatusTimer);\n",
+    "        state.deviceStatusTimer = 0;\n",
+    "      }\n",
+    "    }\n",
+    "    function startDeviceStatusRefresh() {\n",
+    "      stopDeviceStatusRefresh();\n",
+    "      state.deviceStatusTimer = window.setInterval(() => {\n",
+    "        refreshDeviceStatusQuietly();\n",
+    "      }, DEVICE_STATUS_REFRESH_MS);\n",
+    "    }\n",
+    "    function ensureDeviceClockTicker() {\n",
+    "      if (state.deviceClockTimer) {\n",
+    "        return;\n",
+    "      }\n",
+    "      state.deviceClockTimer = window.setInterval(() => {\n",
+    "        if (!document.hidden) {\n",
+    "          renderDeviceClock();\n",
+    "        }\n",
+    "      }, DEVICE_CLOCK_TICK_MS);\n",
+    "    }\n",
+    "    function handlePageVisibilityChange() {\n",
+    "      if (document.hidden) {\n",
+    "        stopDeviceStatusRefresh();\n",
+    "        return;\n",
+    "      }\n",
+    "      renderDeviceClock();\n",
+    "      refreshDeviceStatusQuietly();\n",
+    "      startDeviceStatusRefresh();\n",
+    "    }\n",
     "    async function loadDeviceStatusOnly(doneText) {\n",
     "      if (state.busy) {\n",
     "        return;\n",
@@ -1031,8 +1205,13 @@ static const char *s_photo_index_html_v6[] = {
     "      setBusy(true);\n",
     "      setStatus('正在读取设备状态...', false);\n",
     "      try {\n",
-    "        await refreshDevicePanel();\n",
-    "        setStatus(doneText || '设备状态已更新', false);\n",
+    "        await refreshDeviceStatusPanel(true);\n",
+    "        if (doneText) {\n",
+    "          setStatus(doneText, false);\n",
+    "        } else {\n",
+    "          const statusInfo = buildStatusRefreshMessage();\n",
+    "          setStatus(statusInfo.text, statusInfo.isError);\n",
+    "        }\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '读取设备状态失败', true);\n",
     "      } finally {\n",
@@ -1047,7 +1226,7 @@ static const char *s_photo_index_html_v6[] = {
     "      setStatus('正在同步设备时间...', false);\n",
     "      try {\n",
     "        await syncDeviceTime();\n",
-    "        await refreshDevicePanel();\n",
+    "        await refreshDevicePanel(false);\n",
     "        setStatus('设备时间已同步', false);\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '同步设备时间失败', true);\n",
@@ -1063,7 +1242,7 @@ static const char *s_photo_index_html_v6[] = {
     "      setStatus('正在保存设备配置...', false);\n",
     "      try {\n",
     "        await requestSaveDeviceConfig();\n",
-    "        await refreshDevicePanel();\n",
+    "        await refreshDevicePanel(false);\n",
     "        setStatus('配置已保存，请重启设备使新配置生效', false);\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '保存设备配置失败', true);\n",
@@ -1082,7 +1261,7 @@ static const char *s_photo_index_html_v6[] = {
     "      setStatus('正在恢复默认配置...', false);\n",
     "      try {\n",
     "        await requestFactoryReset();\n",
-    "        await refreshDevicePanel();\n",
+    "        await refreshDevicePanel(false);\n",
     "        setStatus('默认配置已恢复，请重启设备使默认配置生效', false);\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '恢复默认配置失败', true);\n",
@@ -1170,7 +1349,7 @@ static const char *s_photo_index_html_v6[] = {
     "      try {\n",
     "        await syncDeviceTime();\n",
     "        setStatus('正在读取设备状态...', false);\n",
-    "        await refreshDevicePanel();\n",
+    "        await refreshDevicePanel(false);\n",
     "        setStatus('正在读取媒体列表...', false);\n",
     "        await refreshMediaList();\n",
     "        if (doneText) {\n",
@@ -1242,7 +1421,12 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.video.deleteBtn.addEventListener('click', () => deletePaths(Array.from(state.video.selected)));\n",
     "    refs.photo.foldBtn.addEventListener('click', () => toggleSectionFold('photo'));\n",
     "    refs.video.foldBtn.addEventListener('click', () => toggleSectionFold('video'));\n",
+    "    document.addEventListener('visibilitychange', handlePageVisibilityChange);\n",
     "    window.addEventListener('DOMContentLoaded', () => {\n",
+    "      ensureDeviceClockTicker();\n",
+    "      if (!document.hidden) {\n",
+    "        startDeviceStatusRefresh();\n",
+    "      }\n",
     "      loadMedia();\n",
     "    });\n",
     "  </script>\n",
@@ -1779,10 +1963,9 @@ static void photo_web_build_current_time_text(char *time_text, size_t time_text_
         time_t sec = (time_t)tv.tv_sec;
 
         localtime_r(&sec, &tm_info);
-        snprintf(time_text, time_text_size, "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+        snprintf(time_text, time_text_size, "%04d-%02d-%02d %02d:%02d:%02d",
                  tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
-                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
-                 (int)(tv.tv_usec / 1000));
+                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
     } else {
         snprintf(time_text, time_text_size, "时间未同步");
     }
@@ -2115,13 +2298,30 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     char mask_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
     char rtsp_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
     char time_text[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
-    char resp[640] = {0};
+    char query[PHOTO_WEB_STATUS_QUERY_LEN] = {0};
+    char bool_text[8] = {0};
+    char resp[2048] = {0};
+    media_storage_tf_status_t tf_status = {0};
     int resp_len;
     int64_t unix_ms = 0;
     bool time_valid = false;
+    bool run_speed_test = false;
+    size_t query_len;
+    esp_err_t ret;
 
     if (!req) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    query_len = httpd_req_get_url_query_len(req);
+    if (query_len > 0U && query_len < sizeof(query) &&
+        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "run_speed_test", bool_text, sizeof(bool_text)) == ESP_OK) {
+        bool parsed = false;
+
+        if (photo_web_parse_bool_text(bool_text, &parsed)) {
+            run_speed_test = parsed;
+        }
     }
 
     photo_web_fill_ip_texts(ip_text, sizeof(ip_text),
@@ -2129,6 +2329,11 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                             mask_text, sizeof(mask_text),
                             rtsp_url, sizeof(rtsp_url));
     photo_web_build_current_time_text(time_text, sizeof(time_text), &unix_ms, &time_valid);
+    ret = media_storage_get_tf_status(run_speed_test, &tf_status);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取 TF 卡状态失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "读取 TF 卡状态失败");
+    }
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
@@ -2136,11 +2341,36 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     resp_len = snprintf(resp, sizeof(resp),
                         "{\"current_time\":\"%s\",\"current_unix_ms\":%" PRId64
                         ",\"time_valid\":%s,\"current_ip\":\"%s\",\"current_gw\":\"%s\""
-                        ",\"current_mask\":\"%s\",\"rtsp_url\":\"%s\",\"tf_mounted\":%s"
-                        ",\"active_clients\":%" PRIu32 "}",
+                        ",\"current_mask\":\"%s\",\"rtsp_url\":\"%s\""
+                        ",\"tf_mounted\":%s,\"tf_card_ok\":%s,\"tf_full\":%s"
+                        ",\"tf_overwriting_old_video\":%s,\"tf_can_capture\":%s"
+                        ",\"tf_can_start_record\":%s,\"tf_speed_test_valid\":%s"
+                        ",\"tf_speed_too_low\":%s,\"tf_speed_test_skipped\":%s"
+                        ",\"tf_total_bytes\":%" PRIu64 ",\"tf_free_bytes\":%" PRIu64
+                        ",\"tf_used_bytes\":%" PRIu64 ",\"tf_est_record_seconds\":%" PRIu32
+                        ",\"tf_est_photo_count\":%" PRIu32 ",\"tf_write_speed_kbps\":%" PRIu32
+                        ",\"tf_read_speed_kbps\":%" PRIu32 ",\"tf_status_text\":\"%s\""
+                        ",\"tf_speed_text\":\"%s\",\"active_clients\":%" PRIu32 "}",
                         time_text, unix_ms, time_valid ? "true" : "false",
                         ip_text, gw_text, mask_text, rtsp_url,
-                        tf_card_is_mounted() ? "true" : "false",
+                        tf_status.tf_mounted ? "true" : "false",
+                        tf_status.tf_card_ok ? "true" : "false",
+                        tf_status.tf_full ? "true" : "false",
+                        tf_status.tf_overwriting_old_video ? "true" : "false",
+                        tf_status.tf_can_capture ? "true" : "false",
+                        tf_status.tf_can_start_record ? "true" : "false",
+                        tf_status.tf_speed_test_valid ? "true" : "false",
+                        tf_status.tf_speed_too_low ? "true" : "false",
+                        tf_status.tf_speed_test_skipped ? "true" : "false",
+                        tf_status.tf_total_bytes,
+                        tf_status.tf_free_bytes,
+                        tf_status.tf_used_bytes,
+                        tf_status.tf_est_record_seconds,
+                        tf_status.tf_est_photo_count,
+                        tf_status.tf_write_speed_kbps,
+                        tf_status.tf_read_speed_kbps,
+                        tf_status.tf_status_text,
+                        tf_status.tf_speed_text,
                         rtsp_get_active_client_count());
     if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
         return ESP_ERR_INVALID_SIZE;
@@ -2369,6 +2599,11 @@ static esp_err_t photo_web_api_capture_handler(httpd_req_t *req)
         photo_web_set_no_cache(req);
         ESP_LOGI(TAG, "网页拍照请求已受理");
         return httpd_resp_sendstr(req, "{\"ok\":true}");
+    }
+
+    if (ret == ESP_ERR_MEDIA_STORAGE_TF_FULL)
+    {
+        return photo_web_send_json_error(req, "409 Conflict", "TF 卡剩余空间不足，无法拍照");
     }
 
     if (ret == ESP_ERR_INVALID_STATE)
