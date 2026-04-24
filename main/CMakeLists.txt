@@ -1,4 +1,5 @@
 idf_component_register(SRCS "hello_world_main.c"
+                             "User/src/device_web_config.c"
                              "User/src/wifi_connect.c"
                              "User/src/camera.c"
                              "User/src/media_storage.c"

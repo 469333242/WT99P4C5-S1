@@ -3,7 +3,7 @@
  * @brief WiFi连接模块头文件
  *
  * 支持多环境 Profile：每个 Profile 独立配置 SSID/密码/IP策略。
- * 切换环境只需修改 WIFI_ACTIVE_PROFILE 一行。
+ * 默认连接环境仍可通过 WIFI_ACTIVE_PROFILE 切换，网页保存的配置会覆盖静态 IP 开关与地址参数。
  */
 
 #pragma once
@@ -83,7 +83,7 @@ typedef struct {
 /**
  * @brief 初始化WiFi并开始连接
  *
- * 根据 WIFI_ACTIVE_PROFILE 自动决定使用静态IP还是DHCP。
+ * 以 WIFI_ACTIVE_PROFILE 为基础，并叠加网页保存的静态 IP 配置。
  * 调用前需确保 esp_netif 和事件循环已初始化，且 SDIO transport 已就绪。
  *
  * @return ESP_OK 成功

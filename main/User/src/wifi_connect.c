@@ -19,12 +19,16 @@
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_log.h"
+#include "device_web_config.h"
 #include "wifi_connect.h"
 
 static const char *TAG = "wifi_connect";
 
 /* 当前激活的 Profile（在 init 时从宏拷贝，避免复合字面量生命周期问题） */
 static wifi_profile_t s_profile;
+static char s_static_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+static char s_static_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+static char s_static_mask[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
 
 static TimerHandle_t  s_reconnect_timer;
 static esp_netif_t   *s_sta_netif;
@@ -114,6 +118,29 @@ static void wifi_start_sntp_once(void)
         ESP_LOGW(TAG, "SNTP 已由其他模块启动");
     } else {
         ESP_LOGW(TAG, "启动 SNTP 校时失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+    }
+}
+
+static void wifi_load_runtime_profile(void)
+{
+    device_web_config_t web_config = {0};
+
+    s_profile = WIFI_ACTIVE_PROFILE;
+    device_web_config_get(&web_config);
+
+    s_profile.use_static_ip = web_config.wifi_use_static_ip;
+
+    memset(s_static_ip, 0, sizeof(s_static_ip));
+    memset(s_static_gw, 0, sizeof(s_static_gw));
+    memset(s_static_mask, 0, sizeof(s_static_mask));
+
+    if (web_config.wifi_use_static_ip) {
+        strncpy(s_static_ip, web_config.wifi_static_ip, sizeof(s_static_ip) - 1);
+        strncpy(s_static_gw, web_config.wifi_static_gw, sizeof(s_static_gw) - 1);
+        strncpy(s_static_mask, web_config.wifi_static_mask, sizeof(s_static_mask) - 1);
+        s_profile.ip = s_static_ip;
+        s_profile.gw = s_static_gw;
+        s_profile.mask = s_static_mask;
     }
 }
 
@@ -239,12 +266,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
  */
 esp_err_t wifi_connect_init(void)
 {
-    /* 将宏展开的复合字面量拷贝到静态变量，确保生命周期 */
-    s_profile = WIFI_ACTIVE_PROFILE;
+    /* 以编译期默认 Wi-Fi Profile 为基础，再叠加网页保存的运行期配置 */
+    wifi_load_runtime_profile();
 
     ESP_LOGI(TAG, "当前网络配置: SSID=[%s]  模式=%s",
              s_profile.ssid,
              s_profile.use_static_ip ? "静态IP" : "DHCP");
+    if (s_profile.use_static_ip) {
+        ESP_LOGI(TAG, "当前静态IP配置: IP=%s  GW=%s  MASK=%s",
+                 s_profile.ip, s_profile.gw, s_profile.mask);
+    }
 
     s_reconnect_timer = xTimerCreate("wifi_reconnect", pdMS_TO_TICKS(3000),
                                      pdFALSE, NULL, reconnect_timer_cb);

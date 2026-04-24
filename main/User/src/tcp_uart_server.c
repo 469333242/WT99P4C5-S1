@@ -21,6 +21,7 @@
 #include "driver/uart.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
+#include "device_web_config.h"
 #include "tcp_uart_server.h"
 
 /* ------------------------------------------------------------------ */
@@ -35,6 +36,7 @@ typedef struct {
     int          tcp_port;      /* TCP 监听端口 */
     int          tx_pin;        /* UART TX GPIO */
     int          rx_pin;        /* UART RX GPIO */
+    uint32_t     baud_rate;     /* 当前波特率 */
     int          client_fd;     /* 当前 TCP 客户端 socket，-1 表示无连接 */
     SemaphoreHandle_t mutex;    /* 保护 client_fd 的互斥锁 */
     const char  *tag;           /* 日志标签 */
@@ -46,6 +48,7 @@ static uart_channel_t s_ch0 = {
     .tcp_port  = TCP_UART0_PORT,
     .tx_pin    = UART0_TX_PIN,
     .rx_pin    = UART0_RX_PIN,
+    .baud_rate = UART_BAUD_RATE,
     .client_fd = -1,
     .mutex     = NULL,
     .tag       = "UART0-TCP",
@@ -56,6 +59,7 @@ static uart_channel_t s_ch1 = {
     .tcp_port  = TCP_UART1_PORT,
     .tx_pin    = UART1_TX_PIN,
     .rx_pin    = UART1_RX_PIN,
+    .baud_rate = UART_BAUD_RATE,
     .client_fd = -1,
     .mutex     = NULL,
     .tag       = "UART1-TCP",
@@ -74,7 +78,7 @@ static uart_channel_t s_ch1 = {
 static esp_err_t uart_channel_init(uart_channel_t *ch)
 {
     uart_config_t cfg = {
-        .baud_rate  = UART_BAUD_RATE,
+        .baud_rate  = ch->baud_rate,
         .data_bits  = UART_DATA_8_BITS,
         .parity     = UART_PARITY_DISABLE,
         .stop_bits  = UART_STOP_BITS_1,
@@ -103,8 +107,26 @@ static esp_err_t uart_channel_init(uart_channel_t *ch)
     }
 
     ESP_LOGI(ch->tag, "UART%d 初始化完成 (TX=%d, RX=%d, %d bps)",
-             ch->uart_num, ch->tx_pin, ch->rx_pin, UART_BAUD_RATE);
+             ch->uart_num, ch->tx_pin, ch->rx_pin, ch->baud_rate);
     return ESP_OK;
+}
+
+static void uart_channel_load_runtime_config(uart_channel_t *ch)
+{
+    device_web_config_t web_config = {0};
+
+    if (!ch) {
+        return;
+    }
+
+    device_web_config_get(&web_config);
+    if (ch->uart_num == UART_NUM_0) {
+        ch->baud_rate = web_config.uart0_baud_rate;
+    } else if (ch->uart_num == UART_NUM_1) {
+        ch->baud_rate = web_config.uart1_baud_rate;
+    } else {
+        ch->baud_rate = UART_BAUD_RATE;
+    }
 }
 
 /**
@@ -283,6 +305,8 @@ static void tcp_server_task(void *arg)
  */
 static esp_err_t uart_tcp_server_start(uart_channel_t *ch)
 {
+    uart_channel_load_runtime_config(ch);
+
     /* 创建互斥锁 */
     ch->mutex = xSemaphoreCreateMutex();
     if (ch->mutex == NULL) {

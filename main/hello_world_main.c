@@ -3,6 +3,7 @@
  * @brief 应用程序主入口
  *
  * 负责系统初始化与各模块启动，具体实现位于 User/src 与 User/include 目录：
+ *   - device_web_config: 网页设备配置读写（波特率、分辨率、静态 IP）
  *   - wifi_connect     : WiFi STA 连接（通过 ESP32-C5 SDIO 协处理器）
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
@@ -28,6 +29,7 @@
 #include "wifi_connect.h"
 #include "eth_connect.h" 
 #include "eth_tcp_server.h"
+#include "device_web_config.h"
 #include "rtsp_server.h"
 #include "camera.h"
 #include "media_storage.h"
@@ -76,15 +78,16 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *
  * 初始化顺序：
  *   1. NVS flash（WiFi 驱动依赖）
- *   2. esp_netif + 事件循环
- *   3. ESP-Hosted → 等待与 C5 建立 SDIO 链路
- *   4. WiFi 连接
- *   5. TF 卡初始化
- *   6. 媒体存储模块初始化
- *   7. RTSP 服务器启动
- *   8. UART TCP 透传服务启动
- *   9. 以太网初始化并等待链路可用
- *   10. 摄像头初始化并开始采集推流
+ *   2. 设备网页配置初始化
+ *   3. esp_netif + 事件循环
+ *   4. ESP-Hosted → 等待与 C5 建立 SDIO 链路
+ *   5. WiFi 连接
+ *   6. TF 卡初始化
+ *   7. 媒体存储模块初始化
+ *   8. RTSP 服务器启动
+ *   9. UART TCP 透传服务启动
+ *   10. 以太网初始化并等待链路可用
+ *   11. 摄像头初始化并开始采集推流
  */
 void app_main(void)
 {
@@ -93,6 +96,11 @@ void app_main(void)
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         nvs_flash_init();
+    }
+
+    err = device_web_config_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "设备网页配置初始化失败，将继续使用默认配置: 0x%x", err);
     }
 
     /* 2. 网络接口与事件循环 */
@@ -195,10 +203,10 @@ void app_main(void)
 
     /* 6. 启动 UART0 TCP 透传服务（端口 8880） */
     /*    启动 UART1 TCP 透传服务（端口 8881） */
-    //err = tcp_uart0_server_start();
-    //if (err != ESP_OK) {
-    //    ESP_LOGE(TAG, "UART0 透传服务启动失败: 0x%x", err);
-    //}
+    err = tcp_uart0_server_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UART0 透传服务启动失败: 0x%x", err);
+    }
     //err = tcp_uart1_server_start();
     //if (err != ESP_OK) {
     //    ESP_LOGE(TAG, "UART1 透传服务启动失败: 0x%x", err);

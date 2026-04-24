@@ -4,6 +4,7 @@
  *
  * 模块职责：
  *   - 通过 HTTP 服务提供照片和视频浏览网页
+ *   - 提供网页设备状态读取、波特率/分辨率/静态 IP 配置、恢复默认配置和重启接口
  *   - 提供网页拍照接口，请求在推流过程中抓拍一张照片
  *   - 扫描 TF 卡中各次上电目录下的 photo 和 video 子目录
  *   - 将 JPEG 照片和 MP4 录像提供给浏览器访问
@@ -25,12 +26,20 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/ip4_addr.h"
 
+#include "device_web_config.h"
 #include "media_storage.h"
 #include "photo_web_server.h"
 #include "rtsp_server.h"
@@ -48,6 +57,9 @@ static const char *TAG = "photo_web";
 #define PHOTO_WEB_TIME_QUERY_LEN 96
 #define PHOTO_WEB_TIME_VALUE_LEN 24
 #define PHOTO_WEB_DELETE_BODY_MAX_LEN 16384
+#define PHOTO_WEB_CONFIG_BODY_MAX_LEN 512
+#define PHOTO_WEB_STATUS_TEXT_LEN 64
+#define PHOTO_WEB_VALID_UNIX_SEC 1704067200LL
 #define PHOTO_WEB_SERVER_STACK_SIZE (8 * 1024)
 
 typedef struct
@@ -66,6 +78,8 @@ typedef struct
 typedef bool (*photo_web_suffix_check_t)(const char *name);
 
 static photo_web_ctx_t s_photo_web;
+
+static esp_err_t photo_web_read_request_body(httpd_req_t *req, char **body_out);
 
 /* ------------------------------------------------------------------ */
 /* 网页内容                                                            */
@@ -185,6 +199,103 @@ static const char *s_photo_index_html_v6[] = {
     "    .miniDanger {\n",
     "      padding: 7px 12px;\n",
     "      font-size: 12px;\n",
+    "    }\n",
+    "    .settingsGrid {\n",
+    "      display: grid;\n",
+    "      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));\n",
+    "      gap: 18px;\n",
+    "      margin-bottom: 18px;\n",
+    "    }\n",
+    "    .settingCard {\n",
+    "      padding: 18px;\n",
+    "      border: 1px solid rgba(231, 216, 200, .92);\n",
+    "      border-radius: 24px;\n",
+    "      background: rgba(255, 250, 242, .88);\n",
+    "      backdrop-filter: blur(8px);\n",
+    "      box-shadow: 0 18px 42px rgba(74, 39, 16, .08);\n",
+    "    }\n",
+    "    .field {\n",
+    "      display: grid;\n",
+    "      gap: 6px;\n",
+    "      margin-bottom: 12px;\n",
+    "    }\n",
+    "    .field label {\n",
+    "      color: var(--muted);\n",
+    "      font-size: 13px;\n",
+    "      font-weight: 700;\n",
+    "    }\n",
+    "    .field input,\n",
+    "    .field select {\n",
+    "      width: 100%;\n",
+    "      padding: 11px 12px;\n",
+    "      border: 1px solid var(--line);\n",
+    "      border-radius: 14px;\n",
+    "      background: #fff;\n",
+    "      color: var(--ink);\n",
+    "      font-size: 14px;\n",
+    "    }\n",
+    "    .field input:disabled,\n",
+    "    .field select:disabled {\n",
+    "      background: #efe7dd;\n",
+    "      color: #8f7f70;\n",
+    "    }\n",
+    "    .fieldRow {\n",
+    "      display: grid;\n",
+    "      grid-template-columns: repeat(2, minmax(0, 1fr));\n",
+    "      gap: 12px;\n",
+    "    }\n",
+    "    .checkboxLine {\n",
+    "      display: flex;\n",
+    "      align-items: center;\n",
+    "      gap: 10px;\n",
+    "      margin: 8px 0 12px;\n",
+    "      color: var(--ink);\n",
+    "      font-size: 14px;\n",
+    "      font-weight: 700;\n",
+    "    }\n",
+    "    .checkboxLine input {\n",
+    "      width: 16px;\n",
+    "      height: 16px;\n",
+    "      margin: 0;\n",
+    "      accent-color: #c65a1e;\n",
+    "    }\n",
+    "    .settingHint {\n",
+    "      margin-top: 4px;\n",
+    "      color: var(--muted);\n",
+    "      font-size: 12px;\n",
+    "      line-height: 1.7;\n",
+    "    }\n",
+    "    .settingActions {\n",
+    "      display: flex;\n",
+    "      flex-wrap: wrap;\n",
+    "      gap: 10px;\n",
+    "      margin-top: 14px;\n",
+    "    }\n",
+    "    .statusList {\n",
+    "      display: grid;\n",
+    "      gap: 10px;\n",
+    "    }\n",
+    "    .statusRow {\n",
+    "      display: flex;\n",
+    "      align-items: flex-start;\n",
+    "      justify-content: space-between;\n",
+    "      gap: 12px;\n",
+    "      padding: 10px 12px;\n",
+    "      border: 1px solid var(--line);\n",
+    "      border-radius: 16px;\n",
+    "      background: rgba(255, 255, 255, .8);\n",
+    "    }\n",
+    "    .statusKey {\n",
+    "      color: var(--muted);\n",
+    "      font-size: 13px;\n",
+    "      font-weight: 700;\n",
+    "      white-space: nowrap;\n",
+    "    }\n",
+    "    .statusValue {\n",
+    "      font-size: 13px;\n",
+    "      font-weight: 700;\n",
+    "      text-align: right;\n",
+    "      word-break: break-all;\n",
     "    }\n",
     "    .media {\n",
     "      display: grid;\n",
@@ -331,11 +442,14 @@ static const char *s_photo_index_html_v6[] = {
     "      .sectionTools { width: 100%; }\n",
     "    }\n",
     "    @media (max-width: 480px) {\n",
+    "      .fieldRow { grid-template-columns: 1fr; }\n",
     "      .grid { grid-template-columns: 1fr; }\n",
     "      .toolbar,\n",
-    "      .sectionTools { align-items: stretch; }\n",
+    "      .sectionTools,\n",
+    "      .settingActions { align-items: stretch; }\n",
     "      .toolbar button,\n",
     "      .sectionTools button,\n",
+    "      .settingActions button,\n",
     "      .badge,\n",
     "      .count,\n",
     "      .miniBadge {\n",
@@ -350,19 +464,110 @@ static const char *s_photo_index_html_v6[] = {
     "    <header class='hero'>\n",
     "      <div>\n",
     "        <h1 class='title'>SD 卡媒体浏览</h1>\n",
-    "        <p class='desc'>浏览 SD 卡中的照片和视频，支持网页拍照、分区折叠、批量选择和删除操作。</p>\n",
+    "        <p class='desc'>浏览 SD 卡中的照片和视频，支持网页拍照、设备状态查看、波特率与分辨率配置、静态 IP 设置以及批量删除操作。</p>\n",
     "      </div>\n",
     "      <div class='toolbar'>\n",
     "        <div id='status' class='badge' role='status' aria-live='polite'>正在读取媒体列表...</div>\n",
     "        <div id='overview' class='badge' aria-live='polite'>照片 0 张 | 视频 0 段 | 已选 0 项</div>\n",
-    "        <button id='captureBtn' class='primaryBtn' type='button'>立即拍照</button>\n",
     "        <button id='reload' class='ghostBtn' type='button'>刷新列表</button>\n",
     "        <button id='toggleFoldAll' class='ghostBtn' type='button'>全部折叠</button>\n",
-    "        <button id='toggleAllSelection' class='ghostBtn' type='button'>全选</button>\n",
-    "        <button id='clearSelection' class='ghostBtn' type='button'>清空选择</button>\n",
     "        <button id='deleteSelection' class='dangerBtn' type='button'>删除选中</button>\n",
     "      </div>\n",
     "    </header>\n",
+    "    <section class='settingsGrid'>\n",
+    "      <section class='settingCard' aria-labelledby='deviceStatusHeading'>\n",
+    "        <div class='sectionHead'>\n",
+    "          <div class='sectionTitleWrap'>\n",
+    "            <h2 id='deviceStatusHeading'>设备状态</h2>\n",
+    "            <div class='count'>实时读取</div>\n",
+    "          </div>\n",
+    "        </div>\n",
+    "        <div class='statusList'>\n",
+    "          <div class='statusRow'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>当前 IP</div><div id='deviceCurrentIp' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>当前网关</div><div id='deviceCurrentGw' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>子网掩码</div><div id='deviceCurrentMask' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>RTSP 地址</div><div id='deviceRtspUrl' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>RTSP 客户端</div><div id='deviceRtspClients' class='statusValue'>0</div></div>\n",
+    "        </div>\n",
+    "        <div class='settingActions'>\n",
+    "          <button id='refreshStatusBtn' class='ghostBtn' type='button'>读取状态</button>\n",
+    "          <button id='syncTimeBtn' class='ghostBtn' type='button'>同步时间</button>\n",
+    "          <button id='rebootBtn' class='ghostBtn' type='button'>重启设备</button>\n",
+    "        </div>\n",
+    "      </section>\n",
+    "      <section class='settingCard' aria-labelledby='deviceConfigHeading'>\n",
+    "        <div class='sectionHead'>\n",
+    "          <div class='sectionTitleWrap'>\n",
+    "            <h2 id='deviceConfigHeading'>设备设置</h2>\n",
+    "            <div class='count'>保存后重启生效</div>\n",
+    "          </div>\n",
+    "        </div>\n",
+    "        <div class='field'>\n",
+    "          <label for='videoProfile'>视频分辨率</label>\n",
+    "          <select id='videoProfile'>\n",
+    "            <option value='1'>1280 x 960</option>\n",
+    "            <option value='2'>1920 x 1080</option>\n",
+    "            <option value='3'>800 x 800</option>\n",
+    "            <option value='4'>800 x 640</option>\n",
+    "          </select>\n",
+    "        </div>\n",
+    "        <div class='fieldRow'>\n",
+    "          <div class='field'>\n",
+    "            <label for='uart0Baud'>UART0 波特率</label>\n",
+    "            <select id='uart0Baud'>\n",
+    "              <option value='9600'>9600</option>\n",
+    "              <option value='19200'>19200</option>\n",
+    "              <option value='38400'>38400</option>\n",
+    "              <option value='57600'>57600</option>\n",
+    "              <option value='115200'>115200</option>\n",
+    "              <option value='230400'>230400</option>\n",
+    "              <option value='460800'>460800</option>\n",
+    "              <option value='921600'>921600</option>\n",
+    "              <option value='1500000'>1500000</option>\n",
+    "            </select>\n",
+    "          </div>\n",
+    "          <div class='field'>\n",
+    "            <label for='uart1Baud'>UART1 波特率</label>\n",
+    "            <select id='uart1Baud'>\n",
+    "              <option value='9600'>9600</option>\n",
+    "              <option value='19200'>19200</option>\n",
+    "              <option value='38400'>38400</option>\n",
+    "              <option value='57600'>57600</option>\n",
+    "              <option value='115200'>115200</option>\n",
+    "              <option value='230400'>230400</option>\n",
+    "              <option value='460800'>460800</option>\n",
+    "              <option value='921600'>921600</option>\n",
+    "              <option value='1500000'>1500000</option>\n",
+    "            </select>\n",
+    "          </div>\n",
+    "        </div>\n",
+    "        <label class='checkboxLine'>\n",
+    "          <input id='wifiUseStaticIp' type='checkbox'>\n",
+    "          使用静态 IP\n",
+    "        </label>\n",
+    "        <div class='fieldRow'>\n",
+    "          <div class='field'>\n",
+    "            <label for='wifiStaticIp'>静态 IP</label>\n",
+    "            <input id='wifiStaticIp' type='text' inputmode='decimal' placeholder='192.168.0.200'>\n",
+    "          </div>\n",
+    "          <div class='field'>\n",
+    "            <label for='wifiStaticGw'>网关</label>\n",
+    "            <input id='wifiStaticGw' type='text' inputmode='decimal' placeholder='192.168.0.1'>\n",
+    "          </div>\n",
+    "        </div>\n",
+    "        <div class='field'>\n",
+    "          <label for='wifiStaticMask'>子网掩码</label>\n",
+    "          <input id='wifiStaticMask' type='text' inputmode='decimal' placeholder='255.255.255.0'>\n",
+    "        </div>\n",
+    "        <div class='settingHint'>静态 IP、波特率和视频分辨率在保存后需要重启设备生效。恢复默认配置仅重置网页可配置参数，不会删除 TF 卡中的照片和视频。</div>\n",
+    "        <div class='settingActions'>\n",
+    "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
+    "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
+    "        </div>\n",
+    "      </section>\n",
+    "    </section>\n",
     "    <section class='media'>\n",
     "      <section class='panel' aria-labelledby='photoHeading'>\n",
     "        <div class='sectionHead'>\n",
@@ -371,8 +576,10 @@ static const char *s_photo_index_html_v6[] = {
     "            <h2 id='photoHeading'>照片</h2>\n",
     "            <div id='photoCount' class='count'>0 张</div>\n",
     "            <div id='photoSelection' class='miniBadge'>未进入选择</div>\n",
+    "            <button id='photoSelectAllBtn' class='ghostBtn' type='button'>全选</button>\n",
     "          </div>\n",
     "          <div class='sectionTools'>\n",
+    "            <button id='captureBtn' class='primaryBtn' type='button'>立即拍照</button>\n",
     "            <button id='photoToggleAllBtn' class='ghostBtn' type='button'>选择照片</button>\n",
     "            <button id='photoDeleteSelectedBtn' class='dangerBtn' type='button'>删除选中</button>\n",
     "          </div>\n",
@@ -388,6 +595,7 @@ static const char *s_photo_index_html_v6[] = {
     "            <h2 id='videoHeading'>视频</h2>\n",
     "            <div id='videoCount' class='count'>0 段</div>\n",
     "            <div id='videoSelection' class='miniBadge'>未进入选择</div>\n",
+    "            <button id='videoSelectAllBtn' class='ghostBtn' type='button'>全选</button>\n",
     "          </div>\n",
     "          <div class='sectionTools'>\n",
     "            <button id='videoToggleAllBtn' class='ghostBtn' type='button'>选择视频</button>\n",
@@ -406,6 +614,8 @@ static const char *s_photo_index_html_v6[] = {
     "    const CAPTURE_RETRY_DELAY_MS = 500;\n",
     "    const state = {\n",
     "      busy: false,\n",
+    "      deviceConfig: null,\n",
+    "      deviceStatus: null,\n",
     "      photo: { title: '照片', unit: '张', empty: 'SD 卡中暂无照片', items: [], selected: new Set(), collapsed: false, selecting: false },\n",
     "      video: { title: '视频', unit: '段', empty: 'SD 卡中暂无视频', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
     "    };\n",
@@ -415,14 +625,34 @@ static const char *s_photo_index_html_v6[] = {
     "      captureBtn: document.getElementById('captureBtn'),\n",
     "      reloadBtn: document.getElementById('reload'),\n",
     "      toggleFoldAllBtn: document.getElementById('toggleFoldAll'),\n",
-    "      toggleAllSelectionBtn: document.getElementById('toggleAllSelection'),\n",
-    "      clearSelectionBtn: document.getElementById('clearSelection'),\n",
     "      deleteSelectionBtn: document.getElementById('deleteSelection'),\n",
+    "      device: {\n",
+    "        currentTime: document.getElementById('deviceCurrentTime'),\n",
+    "        currentIp: document.getElementById('deviceCurrentIp'),\n",
+    "        currentGw: document.getElementById('deviceCurrentGw'),\n",
+    "        currentMask: document.getElementById('deviceCurrentMask'),\n",
+    "        rtspUrl: document.getElementById('deviceRtspUrl'),\n",
+    "        tfStatus: document.getElementById('deviceTfStatus'),\n",
+    "        rtspClients: document.getElementById('deviceRtspClients'),\n",
+    "        refreshStatusBtn: document.getElementById('refreshStatusBtn'),\n",
+    "        syncTimeBtn: document.getElementById('syncTimeBtn'),\n",
+    "        rebootBtn: document.getElementById('rebootBtn'),\n",
+    "        videoProfile: document.getElementById('videoProfile'),\n",
+    "        uart0Baud: document.getElementById('uart0Baud'),\n",
+    "        uart1Baud: document.getElementById('uart1Baud'),\n",
+    "        wifiUseStaticIp: document.getElementById('wifiUseStaticIp'),\n",
+    "        wifiStaticIp: document.getElementById('wifiStaticIp'),\n",
+    "        wifiStaticGw: document.getElementById('wifiStaticGw'),\n",
+    "        wifiStaticMask: document.getElementById('wifiStaticMask'),\n",
+    "        saveConfigBtn: document.getElementById('saveConfigBtn'),\n",
+    "        factoryResetBtn: document.getElementById('factoryResetBtn')\n",
+    "      },\n",
     "      photo: {\n",
     "        body: document.getElementById('photoBody'),\n",
     "        grid: document.getElementById('photoGrid'),\n",
     "        count: document.getElementById('photoCount'),\n",
     "        selection: document.getElementById('photoSelection'),\n",
+    "        selectAllBtn: document.getElementById('photoSelectAllBtn'),\n",
     "        toggleAllBtn: document.getElementById('photoToggleAllBtn'),\n",
     "        deleteBtn: document.getElementById('photoDeleteSelectedBtn'),\n",
     "        foldBtn: document.getElementById('photoFoldBtn')\n",
@@ -432,6 +662,7 @@ static const char *s_photo_index_html_v6[] = {
     "        grid: document.getElementById('videoGrid'),\n",
     "        count: document.getElementById('videoCount'),\n",
     "        selection: document.getElementById('videoSelection'),\n",
+    "        selectAllBtn: document.getElementById('videoSelectAllBtn'),\n",
     "        toggleAllBtn: document.getElementById('videoToggleAllBtn'),\n",
     "        deleteBtn: document.getElementById('videoDeleteSelectedBtn'),\n",
     "        foldBtn: document.getElementById('videoFoldBtn')\n",
@@ -458,33 +689,15 @@ static const char *s_photo_index_html_v6[] = {
     "    function totalSelectedCount() {\n",
     "      return state.photo.selected.size + state.video.selected.size;\n",
     "    }\n",
-    "    function selectionModeItemCount() {\n",
-    "      let total = 0;\n",
-    "      SECTION_KEYS.forEach((kind) => {\n",
-    "        if (state[kind].selecting) {\n",
-    "          total += state[kind].items.length;\n",
-    "        }\n",
-    "      });\n",
-    "      return total;\n",
-    "    }\n",
     "    function hasSelectionMode() {\n",
     "      return SECTION_KEYS.some((kind) => state[kind].selecting);\n",
     "    }\n",
-    "    function allItemsSelected() {\n",
-    "      const total = selectionModeItemCount();\n",
-    "      let selected = 0;\n",
-    "      if (total === 0) {\n",
-    "        return false;\n",
-    "      }\n",
-    "      SECTION_KEYS.forEach((kind) => {\n",
-    "        if (state[kind].selecting) {\n",
-    "          selected += state[kind].selected.size;\n",
-    "        }\n",
-    "      });\n",
-    "      return selected === total;\n",
-    "    }\n",
     "    function allPanelsCollapsed() {\n",
     "      return SECTION_KEYS.every((kind) => state[kind].items.length === 0 || state[kind].collapsed);\n",
+    "    }\n",
+    "    function sectionAllSelected(kind) {\n",
+    "      const info = state[kind];\n",
+    "      return info.selecting && info.items.length > 0 && info.selected.size === info.items.length;\n",
     "    }\n",
     "    function setStatus(text, isError) {\n",
     "      refs.status.textContent = text;\n",
@@ -505,6 +718,48 @@ static const char *s_photo_index_html_v6[] = {
     "    function waitMs(delay) {\n",
     "      return new Promise((resolve) => window.setTimeout(resolve, delay));\n",
     "    }\n",
+    "    function updateWifiFieldState() {\n",
+    "      const disabled = state.busy || !refs.device.wifiUseStaticIp.checked;\n",
+    "      refs.device.wifiStaticIp.disabled = disabled;\n",
+    "      refs.device.wifiStaticGw.disabled = disabled;\n",
+    "      refs.device.wifiStaticMask.disabled = disabled;\n",
+    "    }\n",
+    "    function renderDeviceStatus() {\n",
+    "      const info = state.deviceStatus || {};\n",
+    "      refs.device.currentTime.textContent = info.current_time || '--';\n",
+    "      refs.device.currentIp.textContent = info.current_ip || '--';\n",
+    "      refs.device.currentGw.textContent = info.current_gw || '--';\n",
+    "      refs.device.currentMask.textContent = info.current_mask || '--';\n",
+    "      refs.device.rtspUrl.textContent = info.rtsp_url || '--';\n",
+    "      refs.device.tfStatus.textContent = info.tf_mounted ? '已挂载' : '未挂载';\n",
+    "      refs.device.rtspClients.textContent = String(Number(info.active_clients) || 0);\n",
+    "    }\n",
+    "    function renderDeviceConfig() {\n",
+    "      const config = state.deviceConfig;\n",
+    "      if (!config) {\n",
+    "        return;\n",
+    "      }\n",
+    "      refs.device.videoProfile.value = String(config.video_profile || '1');\n",
+    "      refs.device.uart0Baud.value = String(config.uart0_baud_rate || '115200');\n",
+    "      refs.device.uart1Baud.value = String(config.uart1_baud_rate || '115200');\n",
+    "      refs.device.wifiUseStaticIp.checked = !!config.wifi_use_static_ip;\n",
+    "      refs.device.wifiStaticIp.value = String(config.wifi_static_ip || '');\n",
+    "      refs.device.wifiStaticGw.value = String(config.wifi_static_gw || '');\n",
+    "      refs.device.wifiStaticMask.value = String(config.wifi_static_mask || '');\n",
+    "      updateWifiFieldState();\n",
+    "    }\n",
+    "    function updateDeviceActions() {\n",
+    "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
+    "      refs.device.syncTimeBtn.disabled = state.busy;\n",
+    "      refs.device.rebootBtn.disabled = state.busy;\n",
+    "      refs.device.videoProfile.disabled = state.busy;\n",
+    "      refs.device.uart0Baud.disabled = state.busy;\n",
+    "      refs.device.uart1Baud.disabled = state.busy;\n",
+    "      refs.device.wifiUseStaticIp.disabled = state.busy;\n",
+    "      refs.device.saveConfigBtn.disabled = state.busy;\n",
+    "      refs.device.factoryResetBtn.disabled = state.busy;\n",
+    "      updateWifiFieldState();\n",
+    "    }\n",
     "    function updateOverview() {\n",
     "      refs.overview.textContent = '照片 ' + state.photo.items.length + ' 张 | 视频 ' + state.video.items.length + ' 段 | 已选 ' + totalSelectedCount() + ' 项';\n",
     "    }\n",
@@ -515,6 +770,8 @@ static const char *s_photo_index_html_v6[] = {
     "      const selected = info.selected.size;\n",
     "      ref.count.textContent = total + ' ' + info.unit;\n",
     "      ref.selection.textContent = info.selecting ? ('已选 ' + selected + ' 项') : '未进入选择';\n",
+    "      ref.selectAllBtn.textContent = sectionAllSelected(kind) ? '取消全选' : '全选';\n",
+    "      ref.selectAllBtn.disabled = state.busy || total === 0;\n",
     "      ref.toggleAllBtn.textContent = info.selecting ? ('取消选择' + info.title) : ('选择' + info.title);\n",
     "      ref.toggleAllBtn.disabled = state.busy || total === 0;\n",
     "      ref.deleteBtn.disabled = state.busy || !info.selecting || selected === 0;\n",
@@ -526,14 +783,10 @@ static const char *s_photo_index_html_v6[] = {
     "    function updateToolbar() {\n",
     "      const total = totalItemCount();\n",
     "      const selected = totalSelectedCount();\n",
-    "      const selectable = selectionModeItemCount();\n",
     "      refs.captureBtn.disabled = state.busy;\n",
     "      refs.reloadBtn.disabled = state.busy;\n",
     "      refs.toggleFoldAllBtn.disabled = state.busy || total === 0;\n",
     "      refs.toggleFoldAllBtn.textContent = allPanelsCollapsed() ? '全部展开' : '全部折叠';\n",
-    "      refs.toggleAllSelectionBtn.disabled = state.busy || selectable === 0;\n",
-    "      refs.toggleAllSelectionBtn.textContent = allItemsSelected() ? '取消全选' : '全选';\n",
-    "      refs.clearSelectionBtn.disabled = state.busy || selected === 0;\n",
     "      refs.deleteSelectionBtn.disabled = state.busy || selected === 0 || !hasSelectionMode();\n",
     "    }\n",
     "    function updateActionStates() {\n",
@@ -541,6 +794,7 @@ static const char *s_photo_index_html_v6[] = {
     "      updateSectionHeader('photo');\n",
     "      updateSectionHeader('video');\n",
     "      updateToolbar();\n",
+    "      updateDeviceActions();\n",
     "    }\n",
     "    function setBusy(busy) {\n",
     "      state.busy = busy;\n",
@@ -651,14 +905,6 @@ static const char *s_photo_index_html_v6[] = {
     "      renderSection('video');\n",
     "      updateActionStates();\n",
     "    }\n",
-    "    function clearAllSelections() {\n",
-    "      if (state.busy) {\n",
-    "        return;\n",
-    "      }\n",
-    "      state.photo.selected.clear();\n",
-    "      state.video.selected.clear();\n",
-    "      renderAll();\n",
-    "    }\n",
     "    function toggleSectionSelection(kind) {\n",
     "      const info = state[kind];\n",
     "      if (state.busy || !info.items.length) {\n",
@@ -670,22 +916,18 @@ static const char *s_photo_index_html_v6[] = {
     "      }\n",
     "      renderAll();\n",
     "    }\n",
-    "    function toggleAllSelection() {\n",
-    "      if (state.busy || selectionModeItemCount() === 0) {\n",
+    "    function toggleSectionSelectAll(kind) {\n",
+    "      const info = state[kind];\n",
+    "      if (state.busy || !info.items.length) {\n",
     "        return;\n",
     "      }\n",
-    "      if (allItemsSelected()) {\n",
-    "        SECTION_KEYS.forEach((kind) => {\n",
-    "          if (state[kind].selecting) {\n",
-    "            state[kind].selected.clear();\n",
-    "          }\n",
-    "        });\n",
+    "      if (!info.selecting) {\n",
+    "        info.selecting = true;\n",
+    "      }\n",
+    "      if (sectionAllSelected(kind)) {\n",
+    "        info.selected.clear();\n",
     "      } else {\n",
-    "        SECTION_KEYS.forEach((kind) => {\n",
-    "          if (state[kind].selecting) {\n",
-    "            state[kind].selected = new Set(state[kind].items.map((item) => item.path));\n",
-    "          }\n",
-    "        });\n",
+    "        info.selected = new Set(info.items.map((item) => item.path));\n",
     "      }\n",
     "      renderAll();\n",
     "    }\n",
@@ -727,8 +969,42 @@ static const char *s_photo_index_html_v6[] = {
     "      const data = await fetchJson(url);\n",
     "      return Array.isArray(data.items) ? data.items : [];\n",
     "    }\n",
+    "    async function fetchDeviceStatus() {\n",
+    "      return fetchJson('/api/status');\n",
+    "    }\n",
+    "    async function fetchDeviceConfig() {\n",
+    "      return fetchJson('/api/config');\n",
+    "    }\n",
     "    async function syncDeviceTime() {\n",
     "      return fetchJson('/api/time?unix_ms=' + Date.now());\n",
+    "    }\n",
+    "    async function requestSaveDeviceConfig() {\n",
+    "      const params = new URLSearchParams();\n",
+    "      params.set('video_profile', refs.device.videoProfile.value);\n",
+    "      params.set('uart0_baud_rate', refs.device.uart0Baud.value);\n",
+    "      params.set('uart1_baud_rate', refs.device.uart1Baud.value);\n",
+    "      params.set('wifi_use_static_ip', refs.device.wifiUseStaticIp.checked ? '1' : '0');\n",
+    "      params.set('wifi_static_ip', refs.device.wifiStaticIp.value.trim());\n",
+    "      params.set('wifi_static_gw', refs.device.wifiStaticGw.value.trim());\n",
+    "      params.set('wifi_static_mask', refs.device.wifiStaticMask.value.trim());\n",
+    "      return fetchJson('/api/config', {\n",
+    "        method: 'POST',\n",
+    "        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },\n",
+    "        body: params.toString()\n",
+    "      });\n",
+    "    }\n",
+    "    async function requestFactoryReset() {\n",
+    "      return fetchJson('/api/factory_reset', { method: 'POST' });\n",
+    "    }\n",
+    "    async function requestDeviceReboot() {\n",
+    "      return fetchJson('/api/reboot', { method: 'POST' });\n",
+    "    }\n",
+    "    async function refreshDevicePanel() {\n",
+    "      const results = await Promise.all([fetchDeviceStatus(), fetchDeviceConfig()]);\n",
+    "      state.deviceStatus = results[0];\n",
+    "      state.deviceConfig = results[1];\n",
+    "      renderDeviceStatus();\n",
+    "      renderDeviceConfig();\n",
     "    }\n",
     "    async function refreshMediaList() {\n",
     "      const results = await Promise.all([fetchList('/api/photos'), fetchList('/api/videos')]);\n",
@@ -747,6 +1023,90 @@ static const char *s_photo_index_html_v6[] = {
     "        headers: { 'Content-Type': 'text/plain; charset=utf-8' },\n",
     "        body: paths.join('\\n')\n",
     "      });\n",
+    "    }\n",
+    "    async function loadDeviceStatusOnly(doneText) {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在读取设备状态...', false);\n",
+    "      try {\n",
+    "        await refreshDevicePanel();\n",
+    "        setStatus(doneText || '设备状态已更新', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '读取设备状态失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function syncDeviceClockAndRefresh() {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在同步设备时间...', false);\n",
+    "      try {\n",
+    "        await syncDeviceTime();\n",
+    "        await refreshDevicePanel();\n",
+    "        setStatus('设备时间已同步', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '同步设备时间失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function saveDeviceConfig() {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在保存设备配置...', false);\n",
+    "      try {\n",
+    "        await requestSaveDeviceConfig();\n",
+    "        await refreshDevicePanel();\n",
+    "        setStatus('配置已保存，请重启设备使新配置生效', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '保存设备配置失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function restoreFactoryConfig() {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      if (!window.confirm('确定恢复网页可配置参数的默认值吗？此操作不会删除 TF 卡文件。')) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在恢复默认配置...', false);\n",
+    "      try {\n",
+    "        await requestFactoryReset();\n",
+    "        await refreshDevicePanel();\n",
+    "        setStatus('默认配置已恢复，请重启设备使默认配置生效', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '恢复默认配置失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function rebootDevice() {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      if (!window.confirm('确定立即重启设备吗？当前页面连接将会中断。')) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在发送重启指令...', false);\n",
+    "      try {\n",
+    "        await requestDeviceReboot();\n",
+    "        setStatus('设备正在重启，请稍后手动刷新页面', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '发送重启指令失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
     "    }\n",
     "    function buildDeleteBatches(paths) {\n",
     "      const batches = [];\n",
@@ -809,6 +1169,8 @@ static const char *s_photo_index_html_v6[] = {
     "      setStatus('正在同步设备时间...', false);\n",
     "      try {\n",
     "        await syncDeviceTime();\n",
+    "        setStatus('正在读取设备状态...', false);\n",
+    "        await refreshDevicePanel();\n",
     "        setStatus('正在读取媒体列表...', false);\n",
     "        await refreshMediaList();\n",
     "        if (doneText) {\n",
@@ -865,10 +1227,16 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.captureBtn.addEventListener('click', capturePhoto);\n",
     "    refs.reloadBtn.addEventListener('click', () => loadMedia());\n",
     "    refs.toggleFoldAllBtn.addEventListener('click', toggleAllFolds);\n",
-    "    refs.toggleAllSelectionBtn.addEventListener('click', toggleAllSelection);\n",
-    "    refs.clearSelectionBtn.addEventListener('click', clearAllSelections);\n",
     "    refs.deleteSelectionBtn.addEventListener('click', () => deletePaths(Array.from(state.photo.selected).concat(Array.from(state.video.selected))));\n",
+    "    refs.device.refreshStatusBtn.addEventListener('click', () => loadDeviceStatusOnly());\n",
+    "    refs.device.syncTimeBtn.addEventListener('click', syncDeviceClockAndRefresh);\n",
+    "    refs.device.rebootBtn.addEventListener('click', rebootDevice);\n",
+    "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
+    "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
+    "    refs.device.wifiUseStaticIp.addEventListener('change', updateWifiFieldState);\n",
+    "    refs.photo.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('photo'));\n",
     "    refs.photo.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('photo'));\n",
+    "    refs.video.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('video'));\n",
     "    refs.video.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('video'));\n",
     "    refs.photo.deleteBtn.addEventListener('click', () => deletePaths(Array.from(state.photo.selected)));\n",
     "    refs.video.deleteBtn.addEventListener('click', () => deletePaths(Array.from(state.video.selected)));\n",
@@ -1278,6 +1646,148 @@ static esp_err_t photo_web_send_delete_result(httpd_req_t *req,
     return httpd_resp_sendstr(req, resp);
 }
 
+static bool photo_web_parse_bool_text(const char *text, bool *value)
+{
+    if (!text || !value) {
+        return false;
+    }
+
+    if (strcmp(text, "1") == 0 || strcasecmp(text, "true") == 0) {
+        *value = true;
+        return true;
+    }
+
+    if (strcmp(text, "0") == 0 || strcasecmp(text, "false") == 0) {
+        *value = false;
+        return true;
+    }
+
+    return false;
+}
+
+static esp_err_t photo_web_form_get_text(const char *body, const char *key,
+                                         char *value, size_t value_size)
+{
+    if (!body || !key || !value || value_size == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    value[0] = '\0';
+    return (httpd_query_key_value(body, key, value, value_size) == ESP_OK) ?
+           ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+static esp_err_t photo_web_form_get_u32(const char *body, const char *key,
+                                        uint32_t *value)
+{
+    char text[24] = {0};
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(photo_web_form_get_text(body, key, text, sizeof(text)),
+                        TAG, "读取表单参数失败");
+
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || parsed > UINT32_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *value = (uint32_t)parsed;
+    return ESP_OK;
+}
+
+static esp_netif_t *photo_web_get_active_netif(void)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+    if (netif) {
+        return netif;
+    }
+
+    return esp_netif_get_handle_from_ifkey("ETH_DEF");
+}
+
+static void photo_web_copy_text_or_default(char *dst, size_t dst_size, const char *text)
+{
+    if (!dst || dst_size == 0U) {
+        return;
+    }
+
+    if (!text || text[0] == '\0') {
+        snprintf(dst, dst_size, "--");
+        return;
+    }
+
+    snprintf(dst, dst_size, "%s", text);
+}
+
+static void photo_web_fill_ip_texts(char *ip_text, size_t ip_text_size,
+                                    char *gw_text, size_t gw_text_size,
+                                    char *mask_text, size_t mask_text_size,
+                                    char *rtsp_url, size_t rtsp_url_size)
+{
+    esp_netif_t *netif = photo_web_get_active_netif();
+    esp_netif_ip_info_t ip_info = {0};
+
+    photo_web_copy_text_or_default(ip_text, ip_text_size, NULL);
+    photo_web_copy_text_or_default(gw_text, gw_text_size, NULL);
+    photo_web_copy_text_or_default(mask_text, mask_text_size, NULL);
+    photo_web_copy_text_or_default(rtsp_url, rtsp_url_size, NULL);
+
+    if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK ||
+        ip_info.ip.addr == 0U) {
+        return;
+    }
+
+    snprintf(ip_text, ip_text_size, IPSTR, IP2STR(&ip_info.ip));
+    snprintf(gw_text, gw_text_size, IPSTR, IP2STR(&ip_info.gw));
+    snprintf(mask_text, mask_text_size, IPSTR, IP2STR(&ip_info.netmask));
+    snprintf(rtsp_url, rtsp_url_size, "rtsp://" IPSTR ":%d/stream",
+             IP2STR(&ip_info.ip), RTSP_PORT);
+}
+
+static bool photo_web_is_time_valid(time_t unix_sec)
+{
+    return unix_sec >= PHOTO_WEB_VALID_UNIX_SEC;
+}
+
+static void photo_web_build_current_time_text(char *time_text, size_t time_text_size,
+                                              int64_t *unix_ms, bool *time_valid)
+{
+    struct timeval tv = {0};
+
+    if (!time_text || time_text_size == 0U) {
+        return;
+    }
+
+    gettimeofday(&tv, NULL);
+
+    if (unix_ms) {
+        *unix_ms = (int64_t)tv.tv_sec * 1000LL + (int64_t)(tv.tv_usec / 1000);
+    }
+    if (time_valid) {
+        *time_valid = photo_web_is_time_valid((time_t)tv.tv_sec);
+    }
+
+    if (photo_web_is_time_valid((time_t)tv.tv_sec)) {
+        struct tm tm_info = {0};
+        time_t sec = (time_t)tv.tv_sec;
+
+        localtime_r(&sec, &tm_info);
+        snprintf(time_text, time_text_size, "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                 tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
+                 (int)(tv.tv_usec / 1000));
+    } else {
+        snprintf(time_text, time_text_size, "时间未同步");
+    }
+}
+
 static char *photo_web_trim_text(char *text)
 {
     char *start = text;
@@ -1598,6 +2108,156 @@ static esp_err_t photo_web_api_videos_handler(httpd_req_t *req)
                                        photo_web_has_mp4_suffix, "/video/");
 }
 
+static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
+{
+    char ip_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char gw_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char mask_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char rtsp_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
+    char time_text[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
+    char resp[640] = {0};
+    int resp_len;
+    int64_t unix_ms = 0;
+    bool time_valid = false;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    photo_web_fill_ip_texts(ip_text, sizeof(ip_text),
+                            gw_text, sizeof(gw_text),
+                            mask_text, sizeof(mask_text),
+                            rtsp_url, sizeof(rtsp_url));
+    photo_web_build_current_time_text(time_text, sizeof(time_text), &unix_ms, &time_valid);
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+
+    resp_len = snprintf(resp, sizeof(resp),
+                        "{\"current_time\":\"%s\",\"current_unix_ms\":%" PRId64
+                        ",\"time_valid\":%s,\"current_ip\":\"%s\",\"current_gw\":\"%s\""
+                        ",\"current_mask\":\"%s\",\"rtsp_url\":\"%s\",\"tf_mounted\":%s"
+                        ",\"active_clients\":%" PRIu32 "}",
+                        time_text, unix_ms, time_valid ? "true" : "false",
+                        ip_text, gw_text, mask_text, rtsp_url,
+                        tf_card_is_mounted() ? "true" : "false",
+                        rtsp_get_active_client_count());
+    if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return httpd_resp_send(req, resp, resp_len);
+}
+
+static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
+{
+    device_web_config_t config = {0};
+    char resp[512] = {0};
+    int resp_len;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    device_web_config_get(&config);
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+
+    resp_len = snprintf(resp, sizeof(resp),
+                        "{\"uart0_baud_rate\":%" PRIu32 ",\"uart1_baud_rate\":%" PRIu32
+                        ",\"video_profile\":%" PRIu32 ",\"video_profile_name\":\"%s\""
+                        ",\"wifi_use_static_ip\":%s,\"wifi_static_ip\":\"%s\""
+                        ",\"wifi_static_gw\":\"%s\",\"wifi_static_mask\":\"%s\"}",
+                        config.uart0_baud_rate, config.uart1_baud_rate,
+                        config.video_profile,
+                        device_web_config_get_video_profile_name(config.video_profile),
+                        config.wifi_use_static_ip ? "true" : "false",
+                        config.wifi_static_ip, config.wifi_static_gw, config.wifi_static_mask);
+    if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return httpd_resp_send(req, resp, resp_len);
+}
+
+static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
+{
+    char *body = NULL;
+    char bool_text[8] = {0};
+    bool wifi_use_static_ip = false;
+    device_web_config_t config = {0};
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (req->content_len > PHOTO_WEB_CONFIG_BODY_MAX_LEN) {
+        return photo_web_send_json_error(req, "413 Payload Too Large", "配置请求过大");
+    }
+
+    ret = photo_web_read_request_body(req, &body);
+    if (ret == ESP_ERR_INVALID_ARG) {
+        return photo_web_send_json_error(req, "400 Bad Request", "配置请求为空");
+    }
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        return photo_web_send_json_error(req, "413 Payload Too Large", "配置请求过大");
+    }
+    if (ret == ESP_ERR_NO_MEM) {
+        return photo_web_send_json_error(req, "500 Internal Server Error", "内存不足");
+    }
+    if (ret != ESP_OK) {
+        return photo_web_send_json_error(req, "400 Bad Request", "配置请求读取失败");
+    }
+
+    ret = photo_web_form_get_u32(body, "video_profile", &config.video_profile);
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_u32(body, "uart0_baud_rate", &config.uart0_baud_rate);
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_u32(body, "uart1_baud_rate", &config.uart1_baud_rate);
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_use_static_ip", bool_text, sizeof(bool_text));
+    }
+    if (ret == ESP_OK && !photo_web_parse_bool_text(bool_text, &wifi_use_static_ip)) {
+        ret = ESP_ERR_INVALID_ARG;
+    }
+    config.wifi_use_static_ip = wifi_use_static_ip;
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_static_ip",
+                                      config.wifi_static_ip, sizeof(config.wifi_static_ip));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_static_gw",
+                                      config.wifi_static_gw, sizeof(config.wifi_static_gw));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_static_mask",
+                                      config.wifi_static_mask, sizeof(config.wifi_static_mask));
+    }
+
+    free(body);
+
+    if (ret != ESP_OK) {
+        return photo_web_send_json_error(req, "400 Bad Request", "配置参数不完整或格式错误");
+    }
+
+    ret = device_web_config_save(&config);
+    if (ret == ESP_ERR_INVALID_ARG) {
+        return photo_web_send_json_error(req, "400 Bad Request", "配置参数非法或当前固件不支持该分辨率");
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "保存设备配置失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "保存设备配置失败");
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"reboot_required\":true}");
+}
+
 static esp_err_t photo_web_api_time_handler(httpd_req_t *req)
 {
     char query[PHOTO_WEB_TIME_QUERY_LEN] = {0};
@@ -1642,6 +2302,46 @@ static esp_err_t photo_web_api_time_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
     return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t photo_web_api_factory_reset_handler(httpd_req_t *req)
+{
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = device_web_config_reset_to_factory();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "恢复默认配置失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "恢复默认配置失败");
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"reboot_required\":true}");
+}
+
+static esp_err_t photo_web_api_reboot_handler(httpd_req_t *req)
+{
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    ret = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "收到网页重启请求，设备即将重启");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+    return ESP_OK;
 }
 
 static esp_err_t photo_web_api_capture_handler(httpd_req_t *req)
@@ -2229,7 +2929,7 @@ esp_err_t photo_web_server_start(void)
     config.server_port = PHOTO_WEB_SERVER_PORT;
     config.stack_size = PHOTO_WEB_SERVER_STACK_SIZE;
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 16;
     config.backlog_conn = 4;
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -2259,6 +2959,24 @@ esp_err_t photo_web_server_start(void)
         .handler = photo_web_api_videos_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t api_status_uri = {
+        .uri = "/api/status",
+        .method = HTTP_GET,
+        .handler = photo_web_api_status_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_config_get_uri = {
+        .uri = "/api/config",
+        .method = HTTP_GET,
+        .handler = photo_web_api_config_get_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_config_post_uri = {
+        .uri = "/api/config",
+        .method = HTTP_POST,
+        .handler = photo_web_api_config_post_handler,
+        .user_ctx = NULL,
+    };
     const httpd_uri_t api_time_uri = {
         .uri = "/api/time",
         .method = HTTP_GET,
@@ -2275,6 +2993,18 @@ esp_err_t photo_web_server_start(void)
         .uri = "/api/delete",
         .method = HTTP_POST,
         .handler = photo_web_api_delete_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_factory_reset_uri = {
+        .uri = "/api/factory_reset",
+        .method = HTTP_POST,
+        .handler = photo_web_api_factory_reset_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_reboot_uri = {
+        .uri = "/api/reboot",
+        .method = HTTP_POST,
+        .handler = photo_web_api_reboot_handler,
         .user_ctx = NULL,
     };
     const httpd_uri_t photo_uri = {
@@ -2313,7 +3043,27 @@ esp_err_t photo_web_server_start(void)
     }
     if (ret == ESP_OK)
     {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_status_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_config_get_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_config_post_uri);
+    }
+    if (ret == ESP_OK)
+    {
         ret = httpd_register_uri_handler(s_photo_web.server, &api_time_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_factory_reset_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_reboot_uri);
     }
     if (ret == ESP_OK)
     {

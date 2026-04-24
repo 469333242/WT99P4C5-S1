@@ -35,6 +35,7 @@
 #include "esp_video_ioctl.h"
 #include "esp_h264_enc_single_hw.h"
 #include "camera.h"
+#include "device_web_config.h"
 #include "media_storage.h"
 #include "rtsp_server.h"
 #include "../../../managed_components/espressif__esp_cam_sensor/sensors/ov5647/private_include/ov5647_settings.h"
@@ -178,57 +179,67 @@ static const esp_cam_sensor_format_t s_ov5647_fmt_800x640 = {
 #define CAM_STALE_FLUSH_MAX CAM_BUF_COUNT /* 开播时最多丢弃当前队列中的陈旧帧 */
 #define CAM_STATS_REPORT_INTERVAL_US (10ULL * 1000 * 1000) /* 10秒调试统计输出周期 */
 
-/* H.264 编码参数
- * 快速切换：只修改 H264_PROFILE
- * 1 = 1280x960
- * 2 = 1920x1080
- * 3 = 800x800
- * 4 = 800x640
- */
-#define H264_PROFILE_1280X960   1
-#define H264_PROFILE_1920X1080  2
-#define H264_PROFILE_800X800    3
-#define H264_PROFILE_800X640    4
-
-#define H264_PROFILE            H264_PROFILE_1280X960
-
-#if H264_PROFILE == H264_PROFILE_1280X960
-#define H264_WIDTH          1280         /* 编码宽度 */
-#define H264_HEIGHT         960          /* 编码高度 */
-#define H264_FPS            45           /* 双客户端默认降到 30fps，降低链路堆积 */
-#define H264_GOP            4            /* 约 89ms 一个 IDR，优先保证 RTSP 快速恢复 */
-#define H264_BITRATE        3500000      /* 平均码率，静止时略低于，运动时略高于 */
-#define H264_QP_MIN         28           /* 最小QP */
-#define H264_QP_MAX         34           /* 最大QP */
-#elif H264_PROFILE == H264_PROFILE_1920X1080
-#define H264_WIDTH          1920         /* 编码宽度 */
-#define H264_HEIGHT         1080         /* 编码高度 */
-#define H264_FPS            30           /* 目标编码帧率 */
-#define H264_GOP            4            /* 约 133ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        5000000      /* 码率5.0Mbps */
-#define H264_QP_MIN         30           /* 最小QP */
-#define H264_QP_MAX         44           /* 最大QP */
-#elif H264_PROFILE == H264_PROFILE_800X800
-#define H264_WIDTH          800          /* 编码宽度 */
-#define H264_HEIGHT         800          /* 编码高度 */
-#define H264_FPS            50           /* 目标编码帧率 */
-#define H264_GOP            6            /* 约 120ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        3000000      /* 码率3.0Mbps */
-#define H264_QP_MIN         28           /* 最小QP */
-#define H264_QP_MAX         42           /* 最大QP */
-#elif H264_PROFILE == H264_PROFILE_800X640
-#define H264_WIDTH          800          /* 编码宽度 */
-#define H264_HEIGHT         640          /* 编码高度 */
-#define H264_FPS            50           /* 目标编码帧率 */
-#define H264_GOP            6            /* 约 120ms 一个 IDR，兼顾低延迟与编码吞吐 */
-#define H264_BITRATE        1800000      /* 码率1.8Mbps */
-#define H264_QP_MIN         26           /* 最小QP */
-#define H264_QP_MAX         40           /* 最大QP */
-#else
-#error "不支持的 H264_PROFILE"
-#endif
 #define H264_OUT_BUF_FACTOR 3            /* 输出缓冲倍数 */
-#define H264_RTP_TS_STEP    (90000 / H264_FPS) /* RTP/H.264 共用 90kHz 时基 */
+
+typedef struct {
+    uint32_t    profile_id;              /* 配置档位编号 */
+    const char *profile_name;            /* 档位显示名称 */
+    uint32_t    width;                   /* 编码宽度 */
+    uint32_t    height;                  /* 编码高度 */
+    uint32_t    fps;                     /* 编码帧率 */
+    uint32_t    gop;                     /* GOP 长度 */
+    uint32_t    bitrate;                 /* 平均码率 */
+    uint32_t    qp_min;                  /* 最小 QP */
+    uint32_t    qp_max;                  /* 最大 QP */
+} camera_h264_profile_t;
+
+static const camera_h264_profile_t s_camera_profile_1280x960 = {
+    .profile_id = DEVICE_WEB_CONFIG_VIDEO_PROFILE_1280X960,
+    .profile_name = "1280x960",
+    .width = 1280,
+    .height = 960,
+    .fps = 45,
+    .gop = 4,
+    .bitrate = 3500000,
+    .qp_min = 28,
+    .qp_max = 34,
+};
+
+static const camera_h264_profile_t s_camera_profile_1920x1080 = {
+    .profile_id = DEVICE_WEB_CONFIG_VIDEO_PROFILE_1920X1080,
+    .profile_name = "1920x1080",
+    .width = 1920,
+    .height = 1080,
+    .fps = 30,
+    .gop = 4,
+    .bitrate = 5000000,
+    .qp_min = 30,
+    .qp_max = 44,
+};
+
+static const camera_h264_profile_t s_camera_profile_800x800 = {
+    .profile_id = DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X800,
+    .profile_name = "800x800",
+    .width = 800,
+    .height = 800,
+    .fps = 50,
+    .gop = 6,
+    .bitrate = 3000000,
+    .qp_min = 28,
+    .qp_max = 42,
+};
+
+static const camera_h264_profile_t s_camera_profile_800x640 = {
+    .profile_id = DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X640,
+    .profile_name = "800x640",
+    .width = 800,
+    .height = 640,
+    .fps = 50,
+    .gop = 6,
+    .bitrate = 1800000,
+    .qp_min = 26,
+    .qp_max = 40,
+};
 
 /* ------------------------------------------------------------------ */
 /* 内部状态                                                             */
@@ -243,6 +254,8 @@ typedef struct {
     esp_h264_enc_handle_t    h264_enc;              /* H.264 编码器句柄 */
     uint8_t                 *h264_out_buf;          /* H.264 输出缓冲 */
     size_t                   h264_out_buf_size;     /* 输出缓冲大小 */
+    camera_h264_profile_t    profile;               /* 当前使用的视频档位 */
+    uint32_t                 rtp_ts_step;           /* RTP 90kHz 时基步进 */
     uint32_t                 pts;                   /* 当前时间戳 */
 } cam_ctx_t;
 
@@ -305,6 +318,39 @@ static void on_rtsp_playing(bool playing)
     }
 }
 
+static bool camera_get_runtime_profile(uint32_t profile_id, camera_h264_profile_t *out_profile)
+{
+    const camera_h264_profile_t *selected_profile = NULL;
+
+    if (!device_web_config_is_valid_video_profile(profile_id)) {
+        return false;
+    }
+
+    switch (profile_id) {
+        case DEVICE_WEB_CONFIG_VIDEO_PROFILE_1280X960:
+            selected_profile = &s_camera_profile_1280x960;
+            break;
+        case DEVICE_WEB_CONFIG_VIDEO_PROFILE_1920X1080:
+            selected_profile = &s_camera_profile_1920x1080;
+            break;
+        case DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X800:
+            selected_profile = &s_camera_profile_800x800;
+            break;
+        case DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X640:
+            selected_profile = &s_camera_profile_800x640;
+            break;
+        default:
+            return false;
+    }
+
+    if (!out_profile) {
+        return true;
+    }
+
+    *out_profile = *selected_profile;
+    return true;
+}
+
 static void __attribute__((unused)) log_sensor_format(const char *stage)
 {
     esp_cam_sensor_format_t sensor_fmt = {0};
@@ -363,15 +409,15 @@ static esp_err_t select_sensor_mode_for_profile(void)
         return ESP_FAIL;
     }
 
-    if (sensor_fmt.width == H264_WIDTH && sensor_fmt.height == H264_HEIGHT) {
+    if (sensor_fmt.width == s_cam.profile.width && sensor_fmt.height == s_cam.profile.height) {
         return ESP_OK;
     }
 
-    target_sensor_fmt = get_target_ov5647_sensor_format(H264_WIDTH, H264_HEIGHT);
+    target_sensor_fmt = get_target_ov5647_sensor_format(s_cam.profile.width, s_cam.profile.height);
     if (target_sensor_fmt == NULL) {
         ESP_LOGE(TAG,
                  "目标传感器格式 %ux%u 未在 sdkconfig 中启用",
-                 H264_WIDTH, H264_HEIGHT);
+                 s_cam.profile.width, s_cam.profile.height);
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -441,7 +487,7 @@ static esp_err_t encode_to_h264(const uint8_t *src, uint32_t w, uint32_t h,
     if (frame_pts) {
         *frame_pts = input_pts;
     }
-    s_cam.pts = input_pts + H264_RTP_TS_STEP;
+    s_cam.pts = input_pts + s_cam.rtp_ts_step;
 
     return ESP_OK;
 }
@@ -579,7 +625,34 @@ static void cam_task(void *arg)
 
 esp_err_t camera_init(void)
 {
+    device_web_config_t web_config = {0};
+    camera_h264_profile_t runtime_profile = {0};
+    uint32_t requested_profile = 0;
+
     memset(&s_cam, 0, sizeof(s_cam));
+
+    device_web_config_get(&web_config);
+    requested_profile = web_config.video_profile;
+    if (!camera_get_runtime_profile(web_config.video_profile, &runtime_profile)) {
+        device_web_config_get_defaults(&web_config);
+        if (!camera_get_runtime_profile(web_config.video_profile, &runtime_profile)) {
+            ESP_LOGE(TAG, "未找到可用的视频档位配置");
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ESP_LOGW(TAG, "读取到未知视频档位 %lu，回退为默认档位",
+                 (unsigned long)requested_profile);
+    }
+    s_cam.profile = runtime_profile;
+    s_cam.rtp_ts_step = 90000U / s_cam.profile.fps;
+    if (s_cam.rtp_ts_step == 0U) {
+        s_cam.rtp_ts_step = 1U;
+    }
+
+    ESP_LOGI(TAG, "当前视频档位: %s | %lux%lu@%lufps",
+             s_cam.profile.profile_name,
+             (unsigned long)s_cam.profile.width,
+             (unsigned long)s_cam.profile.height,
+             (unsigned long)s_cam.profile.fps);
 
     /* 创建采集控制事件组 */
     s_cam_event = xEventGroupCreate();
@@ -642,8 +715,8 @@ esp_err_t camera_init(void)
     /* 尝试设置为 YUV420（ESP32-P4 H.264 编码器原生支持）*/
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = H264_WIDTH;
-    fmt.fmt.pix.height = H264_HEIGHT;
+    fmt.fmt.pix.width = s_cam.profile.width;
+    fmt.fmt.pix.height = s_cam.profile.height;
     fmt.fmt.pix.pixelformat = 0x32315559;  /* YUV 4:2:0 */
 
     if (ioctl(s_cam.fd, VIDIOC_S_FMT, &fmt) != 0) {
@@ -693,26 +766,27 @@ esp_err_t camera_init(void)
 
     /* 5. 初始化硬件 H.264 编码器（使用实际摄像头分辨率和格式）*/
     /* 使用配置的目标码率 */
-    uint32_t bitrate = H264_BITRATE;
+    uint32_t bitrate = s_cam.profile.bitrate;
 
     /* ESP32-P4 H.264 编码器只支持 YUV420 格式 */
     esp_h264_raw_format_t h264_fmt = ESP_H264_RAW_FMT_O_UYY_E_VYY;
 
-    ESP_LOGI(TAG, "H.264 编码器配置 | 分辨率: %"PRIu32"x%"PRIu32" | 帧率: %d fps | 码率: %.1f Mbps | QP: %d-%d",
-             s_cam.width, s_cam.height, H264_FPS, bitrate / 1000000.0f, H264_QP_MIN, H264_QP_MAX);
+    ESP_LOGI(TAG, "H.264 编码器配置 | 分辨率: %"PRIu32"x%"PRIu32" | 帧率: %"PRIu32" fps | 码率: %.1f Mbps | QP: %"PRIu32"-%"PRIu32,
+             s_cam.width, s_cam.height, s_cam.profile.fps, bitrate / 1000000.0f,
+             s_cam.profile.qp_min, s_cam.profile.qp_max);
 
     esp_h264_enc_cfg_hw_t h264_cfg = {
         .pic_type = h264_fmt,
-        .gop      = H264_GOP,
-        .fps      = H264_FPS,
+        .gop      = s_cam.profile.gop,
+        .fps      = s_cam.profile.fps,
         .res      = {
             .width  = s_cam.width,
             .height = s_cam.height,
         },
         .rc = {
             .bitrate = bitrate,
-            .qp_min  = H264_QP_MIN,
-            .qp_max  = H264_QP_MAX,
+            .qp_min  = s_cam.profile.qp_min,
+            .qp_max  = s_cam.profile.qp_max,
         },
     };
 
@@ -750,13 +824,14 @@ esp_err_t camera_init(void)
      * 1280x960 下照片链路会额外占用约 6.7 MB 缓冲。
      * 启动阶段优先保证 RTSP 和录像旁路初始化成功，照片缓冲改为按需申请。
      */
-    esp_err_t media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height, H264_FPS);
+    esp_err_t media_ret = media_storage_prepare_video_record(s_cam.width, s_cam.height,
+                                                             s_cam.profile.fps);
     if (media_ret != ESP_OK) {
         ESP_LOGW(TAG, "录像保存缓冲准备失败，RTSP 将继续运行: 0x%x", media_ret);
     }
 
-    ESP_LOGI(TAG, "H.264 编码器初始化完成: %"PRIu32"x%"PRIu32"@%dfps, GOP=%d, 码率=%"PRIu32" bps",
-             s_cam.width, s_cam.height, H264_FPS, H264_GOP, bitrate);
+    ESP_LOGI(TAG, "H.264 编码器初始化完成: %"PRIu32"x%"PRIu32"@%"PRIu32"fps, GOP=%"PRIu32", 码率=%"PRIu32" bps",
+             s_cam.width, s_cam.height, s_cam.profile.fps, s_cam.profile.gop, bitrate);
 
     /* 6. 开始视频流采集 */
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;

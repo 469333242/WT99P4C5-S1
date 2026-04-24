@@ -38,7 +38,7 @@ extern "C" {
 /*  通信参数配置                                                        */
 /* ------------------------------------------------------------------ */
 
-#define UART_BAUD_RATE      115200  /* 波特率 */
+#define UART_BAUD_RATE      115200  /* 默认波特率，可由网页配置覆盖 */
 #define UART_BUF_SIZE       1024    /* UART 驱动收发缓冲区大小（字节） */
 #define TCP_RX_BUF_SIZE     1024    /* TCP 接收缓冲区大小（字节） */
 
