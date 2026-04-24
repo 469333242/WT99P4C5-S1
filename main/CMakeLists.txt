@@ -6,6 +6,7 @@ idf_component_register(SRCS "hello_world_main.c"
                              "User/src/photo_web_server.c"
                              "User/src/rtsp_server.c"
                              "User/src/tcp_uart_server.c"
+                             "User/src/eth_tcp_server.c"
                              "User/src/eth_connect.c"
                              "User/src/tf_card.c"
                        PRIV_REQUIRES

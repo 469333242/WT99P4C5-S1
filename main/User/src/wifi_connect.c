@@ -34,6 +34,15 @@ static bool s_sntp_started;
 #define WIFI_GOT_IP_BIT BIT0
 #define WIFI_SNTP_SERVER "ntp.aliyun.com"
 #define WIFI_VALID_UNIX_SEC 1704067200LL  /* 2024-01-01 00:00:00 UTC */
+// WiFi 协议配置：开启 5 GHz 的 802.11n/ac/ax 协议，提升连接稳定性和速率
+wifi_protocols_t protocols = {
+    .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX,
+    .ghz_5g = WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX | WIFI_PROTOCOL_11A,
+};
+wifi_bandwidths_t bw = {
+    .ghz_2g = WIFI_BW_HT20,
+    .ghz_5g = WIFI_BW_HT40
+};
 
 /* ------------------------------------------------------------------ */
 /* 静态IP辅助函数                                                        */
@@ -263,6 +272,12 @@ esp_err_t wifi_connect_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
 
+    
+    //设置 WiFi 协议和带宽，必须在 esp_wifi_init() 之后、esp_wifi_start() 之前调用
+    //esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
+    /* C5 刚启动时 WiFi 模块可能还未完全就绪，过早调用 esp_wifi_set_protocol() 可能返回 ESP_ERR_WIFI_NOT_INIT 错误，因此放在这里调用，确保在 esp_wifi_init() 之后、esp_wifi_start() 之前设置协议。 */
+    //esp_wifi_set_protocols(WIFI_IF_STA, &protocols);
+
     /* 配置 STA：SSID / 密码 */
     wifi_config_t wifi_config = {0};
     strncpy((char *)wifi_config.sta.ssid,
@@ -276,10 +291,30 @@ esp_err_t wifi_connect_init(void)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
+    esp_wifi_set_max_tx_power (84); /* 默认最大功率为 20dBm，78 对应约 19.5dBm，适当降低一点延长射频组件寿命 */
     esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
     if (ps_ret != ESP_OK) {
         ESP_LOGW(TAG, "关闭 WiFi 省电模式失败: 0x%x", ps_ret);
     }
 
+    uint8_t protocol_bitmap = 0;
+    wifi_bandwidths_t   bw;
+    esp_err_t ret = esp_wifi_get_protocol(WIFI_IF_STA, &protocol_bitmap);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "当前Wi-Fi协议位图: 0x%X", protocol_bitmap);
+    }
+    // 详细解析协议
+    if (protocol_bitmap & WIFI_PROTOCOL_11B)  ESP_LOGI(TAG, "  - 802.11b 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_11G)  ESP_LOGI(TAG, "  - 802.11g 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_11N)  ESP_LOGI(TAG, "  - 802.11n 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_LR)   ESP_LOGI(TAG, "  - 802.11 LR 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_11A)  ESP_LOGI(TAG, "  - 802.11a 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_11AC) ESP_LOGI(TAG, "  - 802.11ac 已启用");
+    if (protocol_bitmap & WIFI_PROTOCOL_11AX) ESP_LOGI(TAG, "  - 802.11ax 已启用");
+    ret =  esp_wifi_get_bandwidths(WIFI_IF_STA, &bw);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "  - 当前Wi-Fi带宽: 0x%X", bw);
+    }
     return ESP_OK;
 }

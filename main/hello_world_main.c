@@ -10,10 +10,10 @@
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
  *
  * 访问方式：
- *   视频流  : rtsp://<设备WiFi_IP>:8554/stream
- *   ffplay -fflags nobuffer -flags low_delay -framedrop -rtsp_transport tcp "rtsp://192.168.137.200:8554/stream"
- *   串口0   : TCP <设备WiFi_IP>:8880
- *   串口1   : TCP <设备WiFi_IP>:8881
+ *   视频流  : rtsp://<设备IP>:8554/stream
+ *   网页    : http://<设备IP>/
+ *   串口0   : TCP <设备IP>:8880
+ *   串口1   : TCP <设备IP>:8881
  */
 
 #include "freertos/FreeRTOS.h"
@@ -27,6 +27,7 @@
 /* 用户模块 */
 #include "wifi_connect.h"
 #include "eth_connect.h" 
+#include "eth_tcp_server.h"
 #include "rtsp_server.h"
 #include "camera.h"
 #include "media_storage.h"
@@ -35,10 +36,17 @@
 #include "tf_card.h"
 
 /* 网络连接模式选择：0=WiFi, 1=以太网 */
-#define USE_ETHERNET    0
+#define USE_ETHERNET    0   //切换网络连接方式：0=WiFi, 1=以太网
+#define ETH_ENABLE_TCP_SERVER   0   //网口 TCP 透传服务开关
 #define HOSTED_WIFI_READY_DELAY_MS 6000
 #define WIFI_IP_WAIT_SLICE_MS      15000
 #define WIFI_TIME_WAIT_MS          8000
+#define ETH_IP_WAIT_SLICE_MS       15000
+
+#define ETH_USE_STATIC_IP      true
+#define ETH_STATIC_IP          "169.254.27.100"
+#define ETH_STATIC_GW          "169.254.27.1"
+#define ETH_STATIC_MASK        "255.255.255.0"
 
 
 static const char *TAG = "main";
@@ -75,7 +83,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   6. 媒体存储模块初始化
  *   7. RTSP 服务器启动
  *   8. UART TCP 透传服务启动
- *   9. 以太网初始化并启动 ETH TCP 透传服务
+ *   9. 以太网初始化并等待链路可用
  *   10. 摄像头初始化并开始采集推流
  */
 void app_main(void)
@@ -95,20 +103,28 @@ void app_main(void)
     /* 使用以太网连接 */
     ESP_LOGI(TAG, "使用以太网连接");
 
-    /* 以太网配置：true=静态IP, false=DHCP */
-    bool use_static_ip = true;
-    const char *eth_ip = "192.168.0.36";
-    const char *eth_gw = "192.168.0.1";
-    const char *eth_mask = "255.255.255.0";
-
-    err = eth_connect_init(use_static_ip, eth_ip, eth_gw, eth_mask);
+    err = eth_connect_init(ETH_USE_STATIC_IP, ETH_STATIC_IP,
+                           ETH_STATIC_GW, ETH_STATIC_MASK);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "以太网初始化失败: 0x%x", err);
         return;
     }
 
-    /* 等待以太网连接 */
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "等待以太网获取 IP...");
+    while ((err = eth_connect_wait_for_ip(ETH_IP_WAIT_SLICE_MS)) != ESP_OK) {
+        ESP_LOGW(TAG, "以太网 IP 未就绪，继续等待链路建立...");
+    }
+    ESP_LOGI(TAG, "以太网 IP 已就绪，开始启动视频与网页服务");
+
+#if ETH_ENABLE_TCP_SERVER
+    err = eth_tcp_server_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "网口 TCP 服务启动失败: 0x%x", err);
+        return;
+    }
+    ESP_LOGI(TAG, "网口 TCP 服务已启动，访问地址: %s:%d",
+             ETH_STATIC_IP, ETH_TCP_SERVER_PORT);
+#endif
 
 #else
     /* 使用WiFi连接 */
@@ -166,7 +182,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "媒体网页服务启动失败: 0x%x", err);
     } else {
-        ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<IP>/");
+        ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<设备IP>/");
     }
 
     /* 5. 启动 RTSP 服务器（端口 8554） */
@@ -175,7 +191,7 @@ void app_main(void)
         ESP_LOGE(TAG, "RTSP 服务器启动失败: 0x%x", err);
         return;
     }
-    ESP_LOGI(TAG, "RTSP 服务器已启动，访问地址: rtsp://<IP>:%d/stream", RTSP_PORT);
+    ESP_LOGI(TAG, "RTSP 服务器已启动，访问地址: rtsp://<设备IP>:%d/stream", RTSP_PORT);
 
     /* 6. 启动 UART0 TCP 透传服务（端口 8880） */
     /*    启动 UART1 TCP 透传服务（端口 8881） */

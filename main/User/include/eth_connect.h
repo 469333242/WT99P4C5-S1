@@ -25,6 +25,14 @@ extern "C" {
 esp_err_t eth_connect_init(bool use_static_ip, const char *ip,
                            const char *gw, const char *mask);
 
+/**
+ * @brief 等待以太网拿到 IP 地址
+ *
+ * @param timeout_ms 等待超时，单位毫秒；传负数表示一直等待
+ * @return ESP_OK 已拿到 IP，ESP_ERR_TIMEOUT 等待超时
+ */
+esp_err_t eth_connect_wait_for_ip(int timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif
