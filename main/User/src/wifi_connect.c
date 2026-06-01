@@ -1,351 +1,220 @@
 /**
  * @file wifi_connect.c
- * @brief WiFi连接模块实现
+ * @brief Wi-Fi SoftAP 模块实现
  *
- * 实现WiFi STA模式的事件处理和初始化，通过ESP32-C5协处理器连接WiFi网络。
- * 支持多环境 Profile：静态IP 或 DHCP，由 wifi_connect.h 中的宏选择。
+ * 通过 ESP-Hosted 使用 ESP32-C5 协处理器创建设备热点。电脑或手机连接热点后，
+ * 可直接访问网页、RTSP 和 TCP-UART 服务。
  */
 
 #include <inttypes.h>
 #include <string.h>
 #include <sys/time.h>
-#include <time.h>
+
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/event_groups.h"
-#include "freertos/timers.h"
-#include "esp_wifi.h"
+
+#include "esp_check.h"
 #include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_netif_sntp.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+
 #include "device_web_config.h"
+#include "rtsp_server.h"
+#include "tcp_uart_server.h"
 #include "wifi_connect.h"
 
-static const char *TAG = "wifi_connect";
+static const char *TAG = "wifi_ap";
 
-/* 当前激活的 Profile（在 init 时从宏拷贝，避免复合字面量生命周期问题） */
-static wifi_profile_t s_profile;
-static char s_static_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
-static char s_static_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
-static char s_static_mask[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
-
-static TimerHandle_t  s_reconnect_timer;
-static esp_netif_t   *s_sta_netif;
-static EventGroupHandle_t s_wifi_event_group;
-static bool s_sntp_started;
-
-#define WIFI_GOT_IP_BIT BIT0
-#define WIFI_SNTP_SERVER "ntp.aliyun.com"
+#define WIFI_AP_STARTED_BIT BIT0
 #define WIFI_VALID_UNIX_SEC 1704067200LL  /* 2024-01-01 00:00:00 UTC */
-// WiFi 协议配置：开启 5 GHz 的 802.11n/ac/ax 协议，提升连接稳定性和速率
-wifi_protocols_t protocols = {
-    .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX,
-    .ghz_5g = WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX | WIFI_PROTOCOL_11A,
-};
-wifi_bandwidths_t bw = {
-    .ghz_2g = WIFI_BW_HT20,
-    .ghz_5g = WIFI_BW_HT40
-};
 
-/* ------------------------------------------------------------------ */
-/* 静态IP辅助函数                                                        */
-/* ------------------------------------------------------------------ */
-/**
- * @brief 为指定 netif 配置静态 IP，并停用 DHCP 客户端
- *
- * 必须在 esp_netif 创建后、esp_wifi_start() 前调用。
- */
-static esp_err_t apply_static_ip(esp_netif_t *netif, const wifi_profile_t *p)
+static esp_netif_t *s_ap_netif;
+static EventGroupHandle_t s_wifi_event_group;
+static volatile uint32_t s_ap_client_count;
+static device_web_config_t s_ap_config;
+
+static esp_err_t wifi_ap_configure_ip(esp_netif_t *netif)
 {
-    /* 先停止 DHCP 客户端，否则后续 DHCP 应答会覆盖静态配置 */
-    esp_err_t ret = esp_netif_dhcpc_stop(netif);
+    esp_err_t ret;
+    esp_netif_ip_info_t ip_info = {0};
+
+    ESP_RETURN_ON_FALSE(netif != NULL, ESP_ERR_INVALID_ARG, TAG, "AP netif 为空");
+
+    ret = esp_netif_dhcps_stop(netif);
     if (ret != ESP_OK && ret != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
-        ESP_LOGE(TAG, "停止DHCP客户端失败: 0x%x", ret);
+        ESP_LOGE(TAG, "停止 AP DHCP server 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         return ret;
     }
 
-    esp_netif_ip_info_t ip_info = {0};
-    ip_info.ip.addr      = esp_ip4addr_aton(p->ip);
-    ip_info.gw.addr      = esp_ip4addr_aton(p->gw);
-    ip_info.netmask.addr = esp_ip4addr_aton(p->mask);
+    ip_info.ip.addr = esp_ip4addr_aton(s_ap_config.wifi_static_ip);
+    ip_info.gw.addr = esp_ip4addr_aton(s_ap_config.wifi_static_gw);
+    ip_info.netmask.addr = esp_ip4addr_aton(s_ap_config.wifi_static_mask);
 
     ret = esp_netif_set_ip_info(netif, &ip_info);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "设置静态IP失败: 0x%x", ret);
+        ESP_LOGE(TAG, "设置 AP IP 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         return ret;
     }
 
-    /* 静态 IP 不会从 DHCP 获取 DNS，这里使用网关作为 DNS，便于后续 SNTP 域名解析。 */
-    esp_netif_dns_info_t dns_info = {0};
-    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
-    dns_info.ip.u_addr.ip4.addr = esp_ip4addr_aton(p->gw);
-    ret = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns_info);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "设置静态 DNS 失败: 0x%x", ret);
+    ret = esp_netif_dhcps_start(netif);
+    if (ret != ESP_OK && ret != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
+        ESP_LOGE(TAG, "启动 AP DHCP server 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
     }
 
-    ESP_LOGI(TAG, "静态IP已配置 → IP:%s  GW:%s  MASK:%s", p->ip, p->gw, p->mask);
+    ESP_LOGI(TAG, "AP 网络已配置 | IP=%s | GW=%s | MASK=%s",
+             s_ap_config.wifi_static_ip, s_ap_config.wifi_static_gw, s_ap_config.wifi_static_mask);
     return ESP_OK;
-}
-
-static void wifi_sntp_sync_cb(struct timeval *tv)
-{
-    if (!tv || tv->tv_sec < WIFI_VALID_UNIX_SEC) {
-        ESP_LOGW(TAG, "SNTP 返回时间无效");
-        return;
-    }
-
-    ESP_LOGI(TAG, "SNTP 时间同步完成，unix=%" PRId64, (int64_t)tv->tv_sec);
-}
-
-static void wifi_start_sntp_once(void)
-{
-    esp_err_t ret;
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(WIFI_SNTP_SERVER);
-
-    if (s_sntp_started) {
-        return;
-    }
-
-    config.sync_cb = wifi_sntp_sync_cb;
-    ret = esp_netif_sntp_init(&config);
-    if (ret == ESP_OK) {
-        s_sntp_started = true;
-        ESP_LOGI(TAG, "SNTP 校时已启动，服务器: %s", WIFI_SNTP_SERVER);
-    } else if (ret == ESP_ERR_INVALID_STATE) {
-        s_sntp_started = true;
-        ESP_LOGW(TAG, "SNTP 已由其他模块启动");
-    } else {
-        ESP_LOGW(TAG, "启动 SNTP 校时失败: 0x%x (%s)", ret, esp_err_to_name(ret));
-    }
-}
-
-static void wifi_load_runtime_profile(void)
-{
-    device_web_config_t web_config = {0};
-
-    s_profile = WIFI_ACTIVE_PROFILE;
-    device_web_config_get(&web_config);
-
-    s_profile.use_static_ip = web_config.wifi_use_static_ip;
-
-    memset(s_static_ip, 0, sizeof(s_static_ip));
-    memset(s_static_gw, 0, sizeof(s_static_gw));
-    memset(s_static_mask, 0, sizeof(s_static_mask));
-
-    if (web_config.wifi_use_static_ip) {
-        strncpy(s_static_ip, web_config.wifi_static_ip, sizeof(s_static_ip) - 1);
-        strncpy(s_static_gw, web_config.wifi_static_gw, sizeof(s_static_gw) - 1);
-        strncpy(s_static_mask, web_config.wifi_static_mask, sizeof(s_static_mask) - 1);
-        s_profile.ip = s_static_ip;
-        s_profile.gw = s_static_gw;
-        s_profile.mask = s_static_mask;
-    }
 }
 
 esp_err_t wifi_connect_wait_for_ip(int timeout_ms)
 {
+    EventBits_t bits;
+    TickType_t ticks;
+
     if (!s_wifi_event_group) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    TickType_t ticks = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_GOT_IP_BIT,
-                                           pdFALSE, pdTRUE, ticks);
+    ticks = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_AP_STARTED_BIT,
+                               pdFALSE, pdTRUE, ticks);
 
-    return (bits & WIFI_GOT_IP_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
+    return (bits & WIFI_AP_STARTED_BIT) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 esp_err_t wifi_connect_wait_for_time(int timeout_ms)
 {
     struct timeval tv = {0};
-    TickType_t ticks;
-    esp_err_t ret;
+
+    (void)timeout_ms;
 
     gettimeofday(&tv, NULL);
     if (tv.tv_sec >= WIFI_VALID_UNIX_SEC) {
         return ESP_OK;
     }
 
-    if (!s_sntp_started) {
-        ESP_LOGW(TAG, "SNTP 尚未启动，无法等待网络校时");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ticks = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    ret = esp_netif_sntp_sync_wait(ticks);
-    if (ret == ESP_OK) {
-        gettimeofday(&tv, NULL);
-        if (tv.tv_sec >= WIFI_VALID_UNIX_SEC) {
-            ESP_LOGI(TAG, "系统时间已通过 SNTP 校准");
-            return ESP_OK;
-        }
-    }
-
-    ESP_LOGW(TAG, "等待 SNTP 校时超时，请打开媒体网页用电脑时间同步");
+    ESP_LOGW(TAG, "纯 AP 模式等待网页通过浏览器时间完成校时");
     return ESP_ERR_TIMEOUT;
 }
 
-/* ------------------------------------------------------------------ */
-/* 定时器回调                                                            */
-/* ------------------------------------------------------------------ */
-static void reconnect_timer_cb(TimerHandle_t timer)
+uint32_t wifi_connect_get_ap_client_count(void)
 {
-    esp_wifi_connect();
+    return s_ap_client_count;
 }
 
-/* ------------------------------------------------------------------ */
-/* WiFi / IP 事件处理                                                   */
-/* ------------------------------------------------------------------ */
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                int32_t id, void *data)
 {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "WiFi 启动 → 正在连接 [%s]...", s_profile.ssid);
-        esp_wifi_connect();
+    (void)arg;
 
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
-        xTimerStop(s_reconnect_timer, 0);
-        if (s_profile.use_static_ip) {
-            ESP_LOGI(TAG, "WiFi 连接成功！固定IP: %s", s_profile.ip);
-        } else {
-            ESP_LOGI(TAG, "WiFi 连接成功！等待DHCP分配IP...");
-        }
+    if (base != WIFI_EVENT) {
+        return;
+    }
 
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
-        /* 静态IP时也会触发此事件，统一在这里打印最终生效的IP */
+    if (id == WIFI_EVENT_AP_START) {
+        s_ap_client_count = 0;
         ESP_LOGI(TAG, "======================================");
-        ESP_LOGI(TAG, "  IP 已生效: " IPSTR, IP2STR(&event->ip_info.ip));
-        if (!s_profile.use_static_ip) {
-            /* DHCP模式：明确提示用户记录这个IP */
-            ESP_LOGW(TAG, "  当前为DHCP模式，IP可能每次不同");
-            ESP_LOGW(TAG, "  RTSP:  rtsp://" IPSTR ":8554/stream",
-                     IP2STR(&event->ip_info.ip));
-            ESP_LOGW(TAG, "  UART0: " IPSTR ":8880",
-                     IP2STR(&event->ip_info.ip));
-        }
+        ESP_LOGI(TAG, "  Wi-Fi AP 已启动");
+        ESP_LOGI(TAG, "  SSID:  %s", s_ap_config.wifi_ap_ssid);
+        ESP_LOGI(TAG, "  PASS:  %s", s_ap_config.wifi_ap_password);
+        ESP_LOGI(TAG, "  WEB:   http://%s/", s_ap_config.wifi_static_ip);
+        ESP_LOGI(TAG, "  RTSP:  rtsp://%s:%d/stream", s_ap_config.wifi_static_ip, RTSP_PORT);
+        ESP_LOGI(TAG, "  UART0: %s:%d", s_ap_config.wifi_static_ip, TCP_UART0_PORT);
         ESP_LOGI(TAG, "======================================");
-        wifi_start_sntp_once();
-        xEventGroupSetBits(s_wifi_event_group, WIFI_GOT_IP_BIT);
+        xEventGroupSetBits(s_wifi_event_group, WIFI_AP_STARTED_BIT);
+    } else if (id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)data;
 
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t *disconn =
-            (wifi_event_sta_disconnected_t *)data;
-        ESP_LOGW(TAG, "WiFi 断开，reason: %d，稍后重试...", disconn->reason);
-        xEventGroupClearBits(s_wifi_event_group, WIFI_GOT_IP_BIT);
-
-        TickType_t delay;
-        switch (disconn->reason) {
-            case 205: /* NO_AP_FOUND：热点不可见，扫描间隔较长，多等一会 */
-                delay = pdMS_TO_TICKS(6000);
-                break;
-            case 2:   /* AUTH_EXPIRE：C5射频未就绪导致认证超时，等久一点 */
-            case 201: /* HANDSHAKE_TIMEOUT：握手超时，同上 */
-                delay = pdMS_TO_TICKS(5000);
-                break;
-            default:
-                delay = pdMS_TO_TICKS(3000);
-                break;
+        if (s_ap_client_count < WIFI_AP_MAX_CONNECTIONS) {
+            s_ap_client_count++;
         }
-        xTimerChangePeriod(s_reconnect_timer, delay, 0);
-        xTimerStart(s_reconnect_timer, 0);
+        ESP_LOGI(TAG,
+                 "客户端已连接 AP | MAC=" MACSTR " | AID=%d | 当前客户端=%" PRIu32,
+                 MAC2STR(event->mac), event->aid, s_ap_client_count);
+    } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)data;
+
+        if (s_ap_client_count > 0U) {
+            s_ap_client_count--;
+        }
+        ESP_LOGI(TAG,
+                 "客户端已断开 AP | MAC=" MACSTR " | AID=%d | 当前客户端=%" PRIu32,
+                 MAC2STR(event->mac), event->aid, s_ap_client_count);
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* 初始化入口                                                            */
-/* ------------------------------------------------------------------ */
-/**
- * @brief 初始化WiFi并开始连接
- *
- * 自动根据 WIFI_ACTIVE_PROFILE 决定：
- *   - use_static_ip=true  → 停DHCP，写静态IP，IP永远固定
- *   - use_static_ip=false → 保持DHCP，连接后串口打印分配到的IP
- */
 esp_err_t wifi_connect_init(void)
 {
-    /* 以编译期默认 Wi-Fi Profile 为基础，再叠加网页保存的运行期配置 */
-    wifi_load_runtime_profile();
-
-    ESP_LOGI(TAG, "当前网络配置: SSID=[%s]  模式=%s",
-             s_profile.ssid,
-             s_profile.use_static_ip ? "静态IP" : "DHCP");
-    if (s_profile.use_static_ip) {
-        ESP_LOGI(TAG, "当前静态IP配置: IP=%s  GW=%s  MASK=%s",
-                 s_profile.ip, s_profile.gw, s_profile.mask);
-    }
-
-    s_reconnect_timer = xTimerCreate("wifi_reconnect", pdMS_TO_TICKS(3000),
-                                     pdFALSE, NULL, reconnect_timer_cb);
-    s_wifi_event_group = xEventGroupCreate();
-    if (!s_wifi_event_group) {
-        ESP_LOGE(TAG, "创建 WiFi 事件组失败");
-        return ESP_ERR_NO_MEM;
-    }
-
-    /* 创建默认 STA 网络接口 */
-    s_sta_netif = esp_netif_create_default_wifi_sta();
-
-    /* 静态IP：在 esp_wifi_start() 前配置，防止DHCP覆盖 */
-    if (s_profile.use_static_ip) {
-        ESP_ERROR_CHECK(apply_static_ip(s_sta_netif, &s_profile));
-    }
-
-    /* 注册事件处理器 */
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                               wifi_event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                               wifi_event_handler, NULL);
-
-    /* 初始化 WiFi 驱动 */
+    esp_err_t ret;
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
-    
-    //设置 WiFi 协议和带宽，必须在 esp_wifi_init() 之后、esp_wifi_start() 之前调用
-    //esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
-    /* C5 刚启动时 WiFi 模块可能还未完全就绪，过早调用 esp_wifi_set_protocol() 可能返回 ESP_ERR_WIFI_NOT_INIT 错误，因此放在这里调用，确保在 esp_wifi_init() 之后、esp_wifi_start() 之前设置协议。 */
-    //esp_wifi_set_protocols(WIFI_IF_STA, &protocols);
-
-    /* 配置 STA：SSID / 密码 */
     wifi_config_t wifi_config = {0};
-    strncpy((char *)wifi_config.sta.ssid,
-            s_profile.ssid, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char *)wifi_config.sta.password,
-            s_profile.password, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.pmf_cfg.capable    = true;
-    wifi_config.sta.pmf_cfg.required   = false;
 
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
-    esp_wifi_set_max_tx_power (84); /* 默认最大功率为 20dBm，78 对应约 19.5dBm，适当降低一点延长射频组件寿命 */
-    esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (ps_ret != ESP_OK) {
-        ESP_LOGW(TAG, "关闭 WiFi 省电模式失败: 0x%x", ps_ret);
+    device_web_config_get(&s_ap_config);
+
+    if (!s_wifi_event_group) {
+        s_wifi_event_group = xEventGroupCreate();
+        if (!s_wifi_event_group) {
+            ESP_LOGE(TAG, "创建 Wi-Fi 事件组失败");
+            return ESP_ERR_NO_MEM;
+        }
     }
 
-    uint8_t protocol_bitmap = 0;
-    wifi_bandwidths_t   bw;
-    esp_err_t ret = esp_wifi_get_protocol(WIFI_IF_STA, &protocol_bitmap);
-    
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "当前Wi-Fi协议位图: 0x%X", protocol_bitmap);
+    if (!s_ap_netif) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        if (!s_ap_netif) {
+            ESP_LOGE(TAG, "创建默认 AP netif 失败");
+            return ESP_ERR_NO_MEM;
+        }
     }
-    // 详细解析协议
-    if (protocol_bitmap & WIFI_PROTOCOL_11B)  ESP_LOGI(TAG, "  - 802.11b 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_11G)  ESP_LOGI(TAG, "  - 802.11g 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_11N)  ESP_LOGI(TAG, "  - 802.11n 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_LR)   ESP_LOGI(TAG, "  - 802.11 LR 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_11A)  ESP_LOGI(TAG, "  - 802.11a 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_11AC) ESP_LOGI(TAG, "  - 802.11ac 已启用");
-    if (protocol_bitmap & WIFI_PROTOCOL_11AX) ESP_LOGI(TAG, "  - 802.11ax 已启用");
-    ret =  esp_wifi_get_bandwidths(WIFI_IF_STA, &bw);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "  - 当前Wi-Fi带宽: 0x%X", bw);
+
+    ESP_RETURN_ON_ERROR(wifi_ap_configure_ip(s_ap_netif), TAG, "配置 AP IP 失败");
+
+    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                     wifi_event_handler, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册 Wi-Fi 事件处理失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
     }
+
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "初始化 Wi-Fi 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    strncpy((char *)wifi_config.ap.ssid, s_ap_config.wifi_ap_ssid, sizeof(wifi_config.ap.ssid) - 1);
+    strncpy((char *)wifi_config.ap.password, s_ap_config.wifi_ap_password,
+            sizeof(wifi_config.ap.password) - 1);
+    wifi_config.ap.ssid_len = strlen(s_ap_config.wifi_ap_ssid);
+    wifi_config.ap.max_connection = WIFI_AP_MAX_CONNECTIONS;
+
+    ret = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "设置 Wi-Fi AP 模式失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "设置 AP 配置失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "启动 Wi-Fi AP 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_wifi_set_max_tx_power(84);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "设置 Wi-Fi 发射功率失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi AP 初始化完成 | SSID=%s | 最大客户端=%d",
+             s_ap_config.wifi_ap_ssid, WIFI_AP_MAX_CONNECTIONS);
     return ESP_OK;
 }

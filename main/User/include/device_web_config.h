@@ -5,7 +5,7 @@
  * 负责持久化保存可由网页修改的设备参数，包括：
  *   - UART0/UART1 波特率
  *   - 视频分辨率档位
- *   - Wi-Fi 静态 IP 开关与地址参数
+ *   - AP 热点名称、密码与网络地址
  *
  * 这些配置默认在下次重启后生效，不影响 TF 卡中的已有媒体文件。
  */
@@ -22,6 +22,8 @@ extern "C" {
 #endif
 
 #define DEVICE_WEB_CONFIG_IPV4_TEXT_LEN 16
+#define DEVICE_WEB_CONFIG_WIFI_SSID_LEN 32
+#define DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN 64
 
 typedef enum {
     DEVICE_WEB_CONFIG_VIDEO_PROFILE_1280X960 = 1,
@@ -34,6 +36,9 @@ typedef struct {
     uint32_t uart0_baud_rate;
     uint32_t uart1_baud_rate;
     uint32_t video_profile;
+    char     wifi_ap_ssid[DEVICE_WEB_CONFIG_WIFI_SSID_LEN];
+    char     wifi_ap_password[DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN];
+    /* 纯 AP 模式下使用的设备地址、网关与子网掩码。 */
     bool     wifi_use_static_ip;
     char     wifi_static_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
     char     wifi_static_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];

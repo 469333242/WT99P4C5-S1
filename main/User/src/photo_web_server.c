@@ -4,7 +4,7 @@
  *
  * 模块职责：
  *   - 通过 HTTP 服务提供照片和视频浏览网页
- *   - 提供网页设备状态读取、波特率/分辨率/静态 IP 配置、恢复默认配置和重启接口
+ *   - 提供网页设备状态读取、波特率/分辨率配置、恢复默认配置和重启接口
  *   - 提供网页拍照接口，请求在推流过程中抓拍一张照片
  *   - 扫描 TF 卡中各次上电目录下的 photo 和 video 子目录
  *   - 将 JPEG 照片和 MP4 录像提供给浏览器访问
@@ -43,7 +43,9 @@
 #include "media_storage.h"
 #include "photo_web_server.h"
 #include "rtsp_server.h"
+#include "tcp_uart_server.h"
 #include "tf_card.h"
+#include "wifi_connect.h"
 
 static const char *TAG = "photo_web";
 
@@ -205,9 +207,12 @@ static const char *s_photo_index_html_v6[] = {
     "      display: grid;\n",
     "      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));\n",
     "      gap: 18px;\n",
+    "      align-items: stretch;\n",
     "      margin-bottom: 18px;\n",
     "    }\n",
     "    .settingCard {\n",
+    "      display: flex;\n",
+    "      flex-direction: column;\n",
     "      padding: 18px;\n",
     "      border: 1px solid rgba(231, 216, 200, .92);\n",
     "      border-radius: 24px;\n",
@@ -266,6 +271,41 @@ static const char *s_photo_index_html_v6[] = {
     "      font-size: 12px;\n",
     "      line-height: 1.7;\n",
     "    }\n",
+    "    .apInfo {\n",
+    "      display: grid;\n",
+    "      grid-template-columns: repeat(2, minmax(0, 1fr));\n",
+    "      gap: 10px 12px;\n",
+    "      margin-top: 14px;\n",
+    "    }\n",
+    "    .apInfoItem {\n",
+    "      display: grid;\n",
+    "      gap: 6px;\n",
+    "      min-height: 62px;\n",
+    "      padding: 11px 12px;\n",
+    "      border: 1px solid var(--line);\n",
+    "      border-radius: 16px;\n",
+    "      background: rgba(255, 255, 255, .78);\n",
+    "    }\n",
+    "    .apInfoItem.wide {\n",
+    "      grid-column: 1 / -1;\n",
+    "    }\n",
+    "    .apInfoLabel {\n",
+    "      color: var(--muted);\n",
+    "      font-size: 12px;\n",
+    "      font-weight: 700;\n",
+    "    }\n",
+    "    .apInfoValue {\n",
+    "      font-size: 13px;\n",
+    "      font-weight: 700;\n",
+    "      line-height: 1.5;\n",
+    "      word-break: break-all;\n",
+    "    }\n",
+    "    .apInfoItem .field {\n",
+    "      margin-bottom: 0;\n",
+    "    }\n",
+    "    .apInfoItem input {\n",
+    "      border-radius: 12px;\n",
+    "    }\n",
     "    .settingActions {\n",
     "      display: flex;\n",
     "      flex-wrap: wrap;\n",
@@ -276,6 +316,10 @@ static const char *s_photo_index_html_v6[] = {
     "      display: grid;\n",
     "      grid-template-columns: repeat(2, minmax(0, 1fr));\n",
     "      gap: 10px 12px;\n",
+    "    }\n",
+    "    .statusCard .statusList {\n",
+    "      flex: 1;\n",
+    "      grid-auto-rows: minmax(50px, 1fr);\n",
     "    }\n",
     "    .statusRow {\n",
     "      display: grid;\n",
@@ -291,6 +335,11 @@ static const char *s_photo_index_html_v6[] = {
     "    .statusRow.wide {\n",
     "      grid-column: 1 / -1;\n",
     "    }\n",
+    "    .statusRow.compact {\n",
+    "      grid-template-columns: 1fr;\n",
+    "      align-items: start;\n",
+    "      gap: 4px;\n",
+    "    }\n",
     "    .statusKey {\n",
     "      color: var(--muted);\n",
     "      font-size: 13px;\n",
@@ -303,6 +352,10 @@ static const char *s_photo_index_html_v6[] = {
     "      text-align: right;\n",
     "      line-height: 1.6;\n",
     "      word-break: break-all;\n",
+    "    }\n",
+    "    .statusRow.compact .statusValue {\n",
+    "      text-align: left;\n",
+    "      overflow-wrap: anywhere;\n",
     "    }\n",
     "    .statusValue.noWrap {\n",
     "      white-space: nowrap;\n",
@@ -445,7 +498,12 @@ static const char *s_photo_index_html_v6[] = {
     "    @media (max-width: 760px) {\n",
     "      .shell { padding: 18px 12px 32px; }\n",
     "      .panel { padding: 14px; }\n",
+    "      .statusCard .statusList {\n",
+    "        flex: none;\n",
+    "        grid-auto-rows: auto;\n",
+    "      }\n",
     "      .statusList { grid-template-columns: 1fr; }\n",
+    "      .apInfo { grid-template-columns: 1fr; }\n",
     "      .statusRow,\n",
     "      .statusRow.wide {\n",
     "        grid-column: auto;\n",
@@ -480,7 +538,7 @@ static const char *s_photo_index_html_v6[] = {
     "    <header class='hero'>\n",
     "      <div>\n",
     "        <h1 class='title'>SD 卡媒体浏览</h1>\n",
-    "        <p class='desc'>浏览 SD 卡中的照片和视频，支持网页拍照、设备状态查看、波特率与分辨率配置、静态 IP 设置以及批量删除操作。</p>\n",
+    "        <p class='desc'>浏览 SD 卡中的照片和视频，支持网页拍照、设备状态查看、波特率与分辨率配置以及批量删除操作。</p>\n",
     "      </div>\n",
     "      <div class='toolbar'>\n",
     "        <div id='status' class='badge' role='status' aria-live='polite'>正在读取媒体列表...</div>\n",
@@ -491,7 +549,7 @@ static const char *s_photo_index_html_v6[] = {
     "      </div>\n",
     "    </header>\n",
     "    <section class='settingsGrid'>\n",
-    "      <section class='settingCard' aria-labelledby='deviceStatusHeading'>\n",
+    "      <section class='settingCard statusCard' aria-labelledby='deviceStatusHeading'>\n",
     "        <div class='sectionHead'>\n",
     "          <div class='sectionTitleWrap'>\n",
     "            <h2 id='deviceStatusHeading'>设备状态</h2>\n",
@@ -499,18 +557,17 @@ static const char *s_photo_index_html_v6[] = {
     "          </div>\n",
     "        </div>\n",
     "        <div class='statusList'>\n",
-    "          <div class='statusRow'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue noWrap'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>当前 IP</div><div id='deviceCurrentIp' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>当前网关</div><div id='deviceCurrentGw' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>子网掩码</div><div id='deviceCurrentMask' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow wide'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue noWrap'>--</div></div>\n",
     "          <div class='statusRow wide'><div class='statusKey'>RTSP 地址</div><div id='deviceRtspUrl' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow wide'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow wide'><div class='statusKey'>TCP-UART0</div><div id='deviceTcpUart0Url' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TF 读写测速</div><div id='deviceTfSpeed' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>TF 总容量</div><div id='deviceTfTotal' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>TF 剩余容量</div><div id='deviceTfFree' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>预估录像时长</div><div id='deviceTfRecordTime' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>预估拍照数量</div><div id='deviceTfPhotoCount' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow'><div class='statusKey'>TF 读写测速</div><div id='deviceTfSpeed' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>预估录像时长</div><div id='deviceTfRecordTime' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>RTSP 客户端</div><div id='deviceRtspClients' class='statusValue'>0</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>AP 客户端</div><div id='deviceApClients' class='statusValue'>--</div></div>\n",
     "        </div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='refreshStatusBtn' class='ghostBtn' type='button'>读取状态</button>\n",
@@ -518,7 +575,7 @@ static const char *s_photo_index_html_v6[] = {
     "          <button id='rebootBtn' class='ghostBtn' type='button'>重启设备</button>\n",
     "        </div>\n",
     "      </section>\n",
-    "      <section class='settingCard' aria-labelledby='deviceConfigHeading'>\n",
+    "      <section class='settingCard configCard' aria-labelledby='deviceConfigHeading'>\n",
     "        <div class='sectionHead'>\n",
     "          <div class='sectionTitleWrap'>\n",
     "            <h2 id='deviceConfigHeading'>设备设置</h2>\n",
@@ -564,25 +621,15 @@ static const char *s_photo_index_html_v6[] = {
     "            </select>\n",
     "          </div>\n",
     "        </div>\n",
-    "        <label class='checkboxLine'>\n",
-    "          <input id='wifiUseStaticIp' type='checkbox'>\n",
-    "          使用静态 IP\n",
-    "        </label>\n",
-    "        <div class='fieldRow'>\n",
-    "          <div class='field'>\n",
-    "            <label for='wifiStaticIp'>静态 IP</label>\n",
-    "            <input id='wifiStaticIp' type='text' inputmode='decimal' placeholder='192.168.0.200'>\n",
-    "          </div>\n",
-    "          <div class='field'>\n",
-    "            <label for='wifiStaticGw'>网关</label>\n",
-    "            <input id='wifiStaticGw' type='text' inputmode='decimal' placeholder='192.168.0.1'>\n",
-    "          </div>\n",
+    "        <div class='apInfo' aria-label='AP 连接信息'>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiApSsid'>热点名称</label><input id='wifiApSsid' type='text' maxlength='31'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiApPassword'>热点密码</label><input id='wifiApPassword' type='text' maxlength='63'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiApIp'>设备地址</label><input id='wifiApIp' type='text' maxlength='15'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiApGateway'>网关</label><input id='wifiApGateway' type='text' maxlength='15'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiApMask'>子网掩码</label><input id='wifiApMask' type='text' maxlength='15'></div></div>\n",
+    "          <div class='apInfoItem'><div class='apInfoLabel'>最大客户端</div><div id='wifiApMaxClients' class='apInfoValue'>--</div></div>\n",
     "        </div>\n",
-    "        <div class='field'>\n",
-    "          <label for='wifiStaticMask'>子网掩码</label>\n",
-    "          <input id='wifiStaticMask' type='text' inputmode='decimal' placeholder='255.255.255.0'>\n",
-    "        </div>\n",
-    "        <div class='settingHint'>静态 IP、波特率和视频分辨率在保存后需要重启设备生效。恢复默认配置仅重置网页可配置参数，不会删除 TF 卡中的照片和视频。</div>\n",
+    "        <div class='settingHint'>设备当前工作在纯 AP 模式；热点名称、密码、AP 网络地址、波特率和视频分辨率在保存后需要重启设备生效。恢复默认配置不会删除 TF 卡中的照片和视频。</div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
     "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
@@ -656,10 +703,9 @@ static const char *s_photo_index_html_v6[] = {
     "      deleteSelectionBtn: document.getElementById('deleteSelection'),\n",
     "      device: {\n",
     "        currentTime: document.getElementById('deviceCurrentTime'),\n",
-    "        currentIp: document.getElementById('deviceCurrentIp'),\n",
-    "        currentGw: document.getElementById('deviceCurrentGw'),\n",
-    "        currentMask: document.getElementById('deviceCurrentMask'),\n",
+    "        apClients: document.getElementById('deviceApClients'),\n",
     "        rtspUrl: document.getElementById('deviceRtspUrl'),\n",
+    "        tcpUart0Url: document.getElementById('deviceTcpUart0Url'),\n",
     "        tfStatus: document.getElementById('deviceTfStatus'),\n",
     "        tfTotal: document.getElementById('deviceTfTotal'),\n",
     "        tfFree: document.getElementById('deviceTfFree'),\n",
@@ -673,10 +719,12 @@ static const char *s_photo_index_html_v6[] = {
     "        videoProfile: document.getElementById('videoProfile'),\n",
     "        uart0Baud: document.getElementById('uart0Baud'),\n",
     "        uart1Baud: document.getElementById('uart1Baud'),\n",
-    "        wifiUseStaticIp: document.getElementById('wifiUseStaticIp'),\n",
-    "        wifiStaticIp: document.getElementById('wifiStaticIp'),\n",
-    "        wifiStaticGw: document.getElementById('wifiStaticGw'),\n",
-    "        wifiStaticMask: document.getElementById('wifiStaticMask'),\n",
+    "        wifiApSsid: document.getElementById('wifiApSsid'),\n",
+    "        wifiApPassword: document.getElementById('wifiApPassword'),\n",
+    "        wifiApIp: document.getElementById('wifiApIp'),\n",
+    "        wifiApGateway: document.getElementById('wifiApGateway'),\n",
+    "        wifiApMask: document.getElementById('wifiApMask'),\n",
+    "        wifiApMaxClients: document.getElementById('wifiApMaxClients'),\n",
     "        saveConfigBtn: document.getElementById('saveConfigBtn'),\n",
     "        factoryResetBtn: document.getElementById('factoryResetBtn')\n",
     "      },\n",
@@ -823,21 +871,14 @@ static const char *s_photo_index_html_v6[] = {
     "    function waitMs(delay) {\n",
     "      return new Promise((resolve) => window.setTimeout(resolve, delay));\n",
     "    }\n",
-    "    function updateWifiFieldState() {\n",
-    "      const disabled = state.busy || !refs.device.wifiUseStaticIp.checked;\n",
-    "      refs.device.wifiStaticIp.disabled = disabled;\n",
-    "      refs.device.wifiStaticGw.disabled = disabled;\n",
-    "      refs.device.wifiStaticMask.disabled = disabled;\n",
-    "    }\n",
     "    function renderDeviceStatus() {\n",
     "      const info = state.deviceStatus || {};\n",
     "      const tfMounted = !!info.tf_mounted;\n",
     "      updateDeviceClockBase(info);\n",
     "      renderDeviceClock();\n",
-    "      refs.device.currentIp.textContent = info.current_ip || '--';\n",
-    "      refs.device.currentGw.textContent = info.current_gw || '--';\n",
-    "      refs.device.currentMask.textContent = info.current_mask || '--';\n",
+    "      refs.device.apClients.textContent = String(Number(info.ap_connected_clients) || 0);\n",
     "      refs.device.rtspUrl.textContent = info.rtsp_url || '--';\n",
+    "      refs.device.tcpUart0Url.textContent = info.tcp_uart0_url || '--';\n",
     "      refs.device.tfStatus.textContent = info.tf_status_text || (tfMounted ? '已挂载' : '未挂载');\n",
     "      refs.device.tfTotal.textContent = tfMounted ? formatSize(Number(info.tf_total_bytes)) : '--';\n",
     "      refs.device.tfFree.textContent = tfMounted ? formatSize(Number(info.tf_free_bytes)) : '--';\n",
@@ -854,11 +895,12 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.videoProfile.value = String(config.video_profile || '1');\n",
     "      refs.device.uart0Baud.value = String(config.uart0_baud_rate || '115200');\n",
     "      refs.device.uart1Baud.value = String(config.uart1_baud_rate || '115200');\n",
-    "      refs.device.wifiUseStaticIp.checked = !!config.wifi_use_static_ip;\n",
-    "      refs.device.wifiStaticIp.value = String(config.wifi_static_ip || '');\n",
-    "      refs.device.wifiStaticGw.value = String(config.wifi_static_gw || '');\n",
-    "      refs.device.wifiStaticMask.value = String(config.wifi_static_mask || '');\n",
-    "      updateWifiFieldState();\n",
+    "      refs.device.wifiApSsid.value = config.wifi_ap_ssid || '';\n",
+    "      refs.device.wifiApPassword.value = config.wifi_ap_password || '';\n",
+    "      refs.device.wifiApIp.value = config.wifi_ap_ip || '';\n",
+    "      refs.device.wifiApGateway.value = config.wifi_ap_gateway || '';\n",
+    "      refs.device.wifiApMask.value = config.wifi_ap_mask || '';\n",
+    "      refs.device.wifiApMaxClients.textContent = String(Number(config.wifi_ap_max_connections) || 0);\n",
     "    }\n",
     "    function updateDeviceActions() {\n",
     "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
@@ -867,10 +909,13 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.videoProfile.disabled = state.busy;\n",
     "      refs.device.uart0Baud.disabled = state.busy;\n",
     "      refs.device.uart1Baud.disabled = state.busy;\n",
-    "      refs.device.wifiUseStaticIp.disabled = state.busy;\n",
+    "      refs.device.wifiApSsid.disabled = state.busy;\n",
+    "      refs.device.wifiApPassword.disabled = state.busy;\n",
+    "      refs.device.wifiApIp.disabled = state.busy;\n",
+    "      refs.device.wifiApGateway.disabled = state.busy;\n",
+    "      refs.device.wifiApMask.disabled = state.busy;\n",
     "      refs.device.saveConfigBtn.disabled = state.busy;\n",
     "      refs.device.factoryResetBtn.disabled = state.busy;\n",
-    "      updateWifiFieldState();\n",
     "    }\n",
     "    function updateOverview() {\n",
     "      refs.overview.textContent = '照片 ' + state.photo.items.length + ' 张 | 视频 ' + state.video.items.length + ' 段 | 已选 ' + totalSelectedCount() + ' 项';\n",
@@ -1096,10 +1141,11 @@ static const char *s_photo_index_html_v6[] = {
     "      params.set('video_profile', refs.device.videoProfile.value);\n",
     "      params.set('uart0_baud_rate', refs.device.uart0Baud.value);\n",
     "      params.set('uart1_baud_rate', refs.device.uart1Baud.value);\n",
-    "      params.set('wifi_use_static_ip', refs.device.wifiUseStaticIp.checked ? '1' : '0');\n",
-    "      params.set('wifi_static_ip', refs.device.wifiStaticIp.value.trim());\n",
-    "      params.set('wifi_static_gw', refs.device.wifiStaticGw.value.trim());\n",
-    "      params.set('wifi_static_mask', refs.device.wifiStaticMask.value.trim());\n",
+    "      params.set('wifi_ap_ssid', refs.device.wifiApSsid.value.trim());\n",
+    "      params.set('wifi_ap_password', refs.device.wifiApPassword.value);\n",
+    "      params.set('wifi_ap_ip', refs.device.wifiApIp.value.trim());\n",
+    "      params.set('wifi_ap_gateway', refs.device.wifiApGateway.value.trim());\n",
+    "      params.set('wifi_ap_mask', refs.device.wifiApMask.value.trim());\n",
     "      return fetchJson('/api/config', {\n",
     "        method: 'POST',\n",
     "        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },\n",
@@ -1412,7 +1458,6 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.device.rebootBtn.addEventListener('click', rebootDevice);\n",
     "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
     "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
-    "    refs.device.wifiUseStaticIp.addEventListener('change', updateWifiFieldState);\n",
     "    refs.photo.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('photo'));\n",
     "    refs.photo.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('photo'));\n",
     "    refs.video.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('video'));\n",
@@ -1887,7 +1932,7 @@ static esp_err_t photo_web_form_get_u32(const char *body, const char *key,
 
 static esp_netif_t *photo_web_get_active_netif(void)
 {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
 
     if (netif) {
         return netif;
@@ -1913,7 +1958,10 @@ static void photo_web_copy_text_or_default(char *dst, size_t dst_size, const cha
 static void photo_web_fill_ip_texts(char *ip_text, size_t ip_text_size,
                                     char *gw_text, size_t gw_text_size,
                                     char *mask_text, size_t mask_text_size,
-                                    char *rtsp_url, size_t rtsp_url_size)
+                                    char *rtsp_url, size_t rtsp_url_size,
+                                    char *web_url, size_t web_url_size,
+                                    char *tcp_uart0_url, size_t tcp_uart0_url_size,
+                                    char *tcp_uart1_url, size_t tcp_uart1_url_size)
 {
     esp_netif_t *netif = photo_web_get_active_netif();
     esp_netif_ip_info_t ip_info = {0};
@@ -1922,6 +1970,9 @@ static void photo_web_fill_ip_texts(char *ip_text, size_t ip_text_size,
     photo_web_copy_text_or_default(gw_text, gw_text_size, NULL);
     photo_web_copy_text_or_default(mask_text, mask_text_size, NULL);
     photo_web_copy_text_or_default(rtsp_url, rtsp_url_size, NULL);
+    photo_web_copy_text_or_default(web_url, web_url_size, NULL);
+    photo_web_copy_text_or_default(tcp_uart0_url, tcp_uart0_url_size, NULL);
+    photo_web_copy_text_or_default(tcp_uart1_url, tcp_uart1_url_size, NULL);
 
     if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK ||
         ip_info.ip.addr == 0U) {
@@ -1933,6 +1984,11 @@ static void photo_web_fill_ip_texts(char *ip_text, size_t ip_text_size,
     snprintf(mask_text, mask_text_size, IPSTR, IP2STR(&ip_info.netmask));
     snprintf(rtsp_url, rtsp_url_size, "rtsp://" IPSTR ":%d/stream",
              IP2STR(&ip_info.ip), RTSP_PORT);
+    snprintf(web_url, web_url_size, "http://" IPSTR "/", IP2STR(&ip_info.ip));
+    snprintf(tcp_uart0_url, tcp_uart0_url_size, IPSTR ":%d",
+             IP2STR(&ip_info.ip), TCP_UART0_PORT);
+    snprintf(tcp_uart1_url, tcp_uart1_url_size, IPSTR ":%d",
+             IP2STR(&ip_info.ip), TCP_UART1_PORT);
 }
 
 static bool photo_web_is_time_valid(time_t unix_sec)
@@ -2297,15 +2353,20 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     char gw_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
     char mask_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
     char rtsp_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
+    char web_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
+    char tcp_uart0_url[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
+    char tcp_uart1_url[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
     char time_text[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
     char query[PHOTO_WEB_STATUS_QUERY_LEN] = {0};
     char bool_text[8] = {0};
-    char resp[2048] = {0};
+    char resp[3072] = {0};
+    device_web_config_t config = {0};
     media_storage_tf_status_t tf_status = {0};
     int resp_len;
     int64_t unix_ms = 0;
     bool time_valid = false;
     bool run_speed_test = false;
+    uint32_t ap_connected_clients;
     size_t query_len;
     esp_err_t ret;
 
@@ -2324,11 +2385,16 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
         }
     }
 
+    device_web_config_get(&config);
     photo_web_fill_ip_texts(ip_text, sizeof(ip_text),
                             gw_text, sizeof(gw_text),
                             mask_text, sizeof(mask_text),
-                            rtsp_url, sizeof(rtsp_url));
+                            rtsp_url, sizeof(rtsp_url),
+                            web_url, sizeof(web_url),
+                            tcp_uart0_url, sizeof(tcp_uart0_url),
+                            tcp_uart1_url, sizeof(tcp_uart1_url));
     photo_web_build_current_time_text(time_text, sizeof(time_text), &unix_ms, &time_valid);
+    ap_connected_clients = wifi_connect_get_ap_client_count();
     ret = media_storage_get_tf_status(run_speed_test, &tf_status);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "读取 TF 卡状态失败: 0x%x (%s)", ret, esp_err_to_name(ret));
@@ -2341,7 +2407,10 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     resp_len = snprintf(resp, sizeof(resp),
                         "{\"current_time\":\"%s\",\"current_unix_ms\":%" PRId64
                         ",\"time_valid\":%s,\"current_ip\":\"%s\",\"current_gw\":\"%s\""
-                        ",\"current_mask\":\"%s\",\"rtsp_url\":\"%s\""
+                        ",\"current_mask\":\"%s\",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
+                        ",\"wifi_ap_ip\":\"%s\",\"wifi_ap_max_connections\":%d"
+                        ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\",\"tcp_uart0_url\":\"%s\""
+                        ",\"tcp_uart1_url\":\"%s\",\"ap_connected_clients\":%" PRIu32
                         ",\"tf_mounted\":%s,\"tf_card_ok\":%s,\"tf_full\":%s"
                         ",\"tf_overwriting_old_video\":%s,\"tf_can_capture\":%s"
                         ",\"tf_can_start_record\":%s,\"tf_speed_test_valid\":%s"
@@ -2352,7 +2421,10 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         ",\"tf_read_speed_kbps\":%" PRIu32 ",\"tf_status_text\":\"%s\""
                         ",\"tf_speed_text\":\"%s\",\"active_clients\":%" PRIu32 "}",
                         time_text, unix_ms, time_valid ? "true" : "false",
-                        ip_text, gw_text, mask_text, rtsp_url,
+                        ip_text, gw_text, mask_text,
+                        config.wifi_ap_ssid, config.wifi_static_ip, WIFI_AP_MAX_CONNECTIONS,
+                        web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url,
+                        ap_connected_clients,
                         tf_status.tf_mounted ? "true" : "false",
                         tf_status.tf_card_ok ? "true" : "false",
                         tf_status.tf_full ? "true" : "false",
@@ -2382,7 +2454,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
 static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 {
     device_web_config_t config = {0};
-    char resp[512] = {0};
+    char resp[768] = {0};
     int resp_len;
 
     if (!req) {
@@ -2397,13 +2469,20 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
     resp_len = snprintf(resp, sizeof(resp),
                         "{\"uart0_baud_rate\":%" PRIu32 ",\"uart1_baud_rate\":%" PRIu32
                         ",\"video_profile\":%" PRIu32 ",\"video_profile_name\":\"%s\""
-                        ",\"wifi_use_static_ip\":%s,\"wifi_static_ip\":\"%s\""
-                        ",\"wifi_static_gw\":\"%s\",\"wifi_static_mask\":\"%s\"}",
+                        ",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
+                        ",\"wifi_ap_password\":\"%s\",\"wifi_ap_ip\":\"%s\""
+                        ",\"wifi_ap_gateway\":\"%s\",\"wifi_ap_mask\":\"%s\""
+                        ",\"wifi_ap_max_connections\":%d"
+                        ",\"web_url\":\"http://%s/\",\"rtsp_url\":\"rtsp://%s:%d/stream\""
+                        ",\"tcp_uart0_url\":\"%s:%d\",\"tcp_uart1_url\":\"%s:%d\"}",
                         config.uart0_baud_rate, config.uart1_baud_rate,
                         config.video_profile,
                         device_web_config_get_video_profile_name(config.video_profile),
-                        config.wifi_use_static_ip ? "true" : "false",
-                        config.wifi_static_ip, config.wifi_static_gw, config.wifi_static_mask);
+                        config.wifi_ap_ssid, config.wifi_ap_password,
+                        config.wifi_static_ip, config.wifi_static_gw, config.wifi_static_mask,
+                        WIFI_AP_MAX_CONNECTIONS,
+                        config.wifi_static_ip, config.wifi_static_ip, RTSP_PORT,
+                        config.wifi_static_ip, TCP_UART0_PORT, config.wifi_static_ip, TCP_UART1_PORT);
     if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -2414,8 +2493,6 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
 {
     char *body = NULL;
-    char bool_text[8] = {0};
-    bool wifi_use_static_ip = false;
     device_web_config_t config = {0};
     esp_err_t ret;
 
@@ -2449,22 +2526,24 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
         ret = photo_web_form_get_u32(body, "uart1_baud_rate", &config.uart1_baud_rate);
     }
     if (ret == ESP_OK) {
-        ret = photo_web_form_get_text(body, "wifi_use_static_ip", bool_text, sizeof(bool_text));
+        ret = photo_web_form_get_text(body, "wifi_ap_ssid",
+                                      config.wifi_ap_ssid, sizeof(config.wifi_ap_ssid));
     }
-    if (ret == ESP_OK && !photo_web_parse_bool_text(bool_text, &wifi_use_static_ip)) {
-        ret = ESP_ERR_INVALID_ARG;
-    }
-    config.wifi_use_static_ip = wifi_use_static_ip;
     if (ret == ESP_OK) {
-        ret = photo_web_form_get_text(body, "wifi_static_ip",
+        ret = photo_web_form_get_text(body, "wifi_ap_password",
+                                      config.wifi_ap_password, sizeof(config.wifi_ap_password));
+    }
+    config.wifi_use_static_ip = true;
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_ap_ip",
                                       config.wifi_static_ip, sizeof(config.wifi_static_ip));
     }
     if (ret == ESP_OK) {
-        ret = photo_web_form_get_text(body, "wifi_static_gw",
+        ret = photo_web_form_get_text(body, "wifi_ap_gateway",
                                       config.wifi_static_gw, sizeof(config.wifi_static_gw));
     }
     if (ret == ESP_OK) {
-        ret = photo_web_form_get_text(body, "wifi_static_mask",
+        ret = photo_web_form_get_text(body, "wifi_ap_mask",
                                       config.wifi_static_mask, sizeof(config.wifi_static_mask));
     }
 
