@@ -2499,12 +2499,6 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
         return ret;
     }
 
-    ESP_LOGI(TAG, "录像缓冲已准备 | %ux%u@%u | 队列=%u/%u | 帧缓冲=%zu",
-             (unsigned)width, (unsigned)height, (unsigned)fps,
-             (unsigned)s_media.video_slot_count,
-             (unsigned)MEDIA_STORAGE_VIDEO_QUEUE_LEN, frame_buf_size);
-    ESP_LOGI(TAG, "录像保存策略 | 每 %" PRIu32 " 个 GOP 保存 1 个，优先保证 RTSP 实时性",
-             (uint32_t)MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL);
     if (record_requested_before) {
         ESP_LOGI(TAG, "录像缓冲准备完成，恢复此前保留的录像请求");
     }

@@ -8,6 +8,7 @@
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
+ *   - usb_thermal_camera: USB UVC 热像仪持续采集与灰度帧转换
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
  *
  * 访问方式：
@@ -36,6 +37,7 @@
 #include "photo_web_server.h"
 #include "tcp_uart_server.h"
 #include "tf_card.h"
+#include "usb_thermal_camera.h"
 
 /* 网络连接模式选择：0=WiFi, 1=以太网 */
 #define USE_ETHERNET    0   //切换网络连接方式：0=WiFi, 1=以太网
@@ -49,6 +51,15 @@
 #define ETH_STATIC_IP          "169.254.27.100"
 #define ETH_STATIC_GW          "169.254.27.1"
 #define ETH_STATIC_MASK        "255.255.255.0"
+
+/* 视频源选择：两个摄像头不同时工作。
+ * 当前默认使用 USB 热像仪；如需切回 OV5647，将 APP_VIDEO_SOURCE 改为 VIDEO_SOURCE_MIPI。
+ * 0 = OV5647 MIPI 摄像头
+ * 1 = USB 热像仪
+ */
+#define VIDEO_SOURCE_MIPI          0
+#define VIDEO_SOURCE_USB_THERMAL   1
+#define APP_VIDEO_SOURCE           VIDEO_SOURCE_USB_THERMAL
 
 
 static const char *TAG = "main";
@@ -88,6 +99,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   9. UART TCP 透传服务启动
  *   10. 以太网初始化并等待链路可用
  *   11. 摄像头初始化并开始采集推流
+ *   12. 按 APP_VIDEO_SOURCE 选择 MIPI 摄像头或 USB 热像仪 RTSP 链路
  */
 void app_main(void)
 {
@@ -211,9 +223,25 @@ void app_main(void)
     //    ESP_LOGE(TAG, "UART1 透传服务启动失败: 0x%x", err);
     //}
 
-    /* 7. 初始化摄像头并开始采集推流 */
+#if APP_VIDEO_SOURCE == VIDEO_SOURCE_MIPI
+    /* 7. 初始化 MIPI 摄像头并开始采集推流 */
     err = camera_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "摄像头初始化失败: 0x%x", err);
     }
+#elif APP_VIDEO_SOURCE == VIDEO_SOURCE_USB_THERMAL
+    /* 7. 启动 USB 热像仪 UVC 采集。
+     * 热像仪 RTSP 链路复用同一个 RTSP 服务端，和 MIPI 摄像头不同时工作。 */
+    err = usb_thermal_camera_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "USB 热像仪采集启动失败: 0x%x", err);
+    } else {
+        err = usb_thermal_camera_rtsp_init();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "USB 热像仪 RTSP 初始化失败: 0x%x", err);
+        }
+    }
+#else
+#error "APP_VIDEO_SOURCE 配置错误"
+#endif
 }

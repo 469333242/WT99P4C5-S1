@@ -10,6 +10,7 @@ idf_component_register(SRCS "hello_world_main.c"
                              "User/src/eth_tcp_server.c"
                              "User/src/eth_connect.c"
                              "User/src/tf_card.c"
+                             "User/src/usb_thermal_camera.c"
                        PRIV_REQUIRES
                            spi_flash
                            esp_wifi
@@ -28,6 +29,8 @@ idf_component_register(SRCS "hello_world_main.c"
                            esp_muxer
                            esp_eth
                            esp_timer
+                           usb
+                           usb_host_uvc
                            fatfs
                            sdmmc
                        INCLUDE_DIRS "User/include"

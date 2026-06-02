@@ -17,8 +17,8 @@
 
 #define WIFI_AP_SSID             "WT99P4C5"
 #define WIFI_AP_PASSWORD         "12345678"
-#define WIFI_AP_IP               "192.168.4.1"
-#define WIFI_AP_GW               "192.168.4.1"
+#define WIFI_AP_IP               "192.168.144.1"
+#define WIFI_AP_GW               "192.168.144.1"
 #define WIFI_AP_MASK             "255.255.255.0"
 #define WIFI_AP_MAX_CONNECTIONS  4
 

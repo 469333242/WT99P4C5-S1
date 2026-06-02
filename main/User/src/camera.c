@@ -184,7 +184,7 @@ static const esp_cam_sensor_format_t s_ov5647_fmt_800x640 = {
 
 #define H264_OUT_BUF_FACTOR 3            /* 输出缓冲倍数 */
 
-#define CAM_OSD_TIMESTAMP_DEFAULT_ENABLE true /* 时间戳 OSD 默认关闭，保持原视频链路不改写帧 */
+#define CAM_OSD_TIMESTAMP_DEFAULT_ENABLE false /* 时间戳 OSD 默认关闭，保持原视频链路不改写帧 */
 #define CAM_OSD_VALID_UNIX_SEC           1704067200LL  /* 2024-01-01 00:00:00 UTC */
 #define CAM_OSD_TIMESTAMP_TEXT_LEN       32
 #define CAM_OSD_FONT_WIDTH               5
