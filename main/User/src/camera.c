@@ -16,10 +16,13 @@
 
 #include <string.h>
 #include <inttypes.h>
+#include <stdio.h>
+#include <time.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/errno.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -181,6 +184,20 @@ static const esp_cam_sensor_format_t s_ov5647_fmt_800x640 = {
 
 #define H264_OUT_BUF_FACTOR 3            /* 输出缓冲倍数 */
 
+#define CAM_OSD_TIMESTAMP_DEFAULT_ENABLE true /* 时间戳 OSD 默认关闭，保持原视频链路不改写帧 */
+#define CAM_OSD_VALID_UNIX_SEC           1704067200LL  /* 2024-01-01 00:00:00 UTC */
+#define CAM_OSD_TIMESTAMP_TEXT_LEN       32
+#define CAM_OSD_FONT_WIDTH               5
+#define CAM_OSD_FONT_HEIGHT              7
+#define CAM_OSD_FONT_SCALE               2
+#define CAM_OSD_CHAR_SPACING             1
+#define CAM_OSD_MARGIN_X                 12
+#define CAM_OSD_MARGIN_Y                 12
+#define CAM_OSD_PADDING_X                6
+#define CAM_OSD_PADDING_Y                4
+#define CAM_OSD_BG_LUMA                  24
+#define CAM_OSD_TEXT_LUMA                235
+
 typedef struct {
     uint32_t    profile_id;              /* 配置档位编号 */
     const char *profile_name;            /* 档位显示名称 */
@@ -264,6 +281,247 @@ static cam_ctx_t s_cam;
 /* 用于控制采集任务启停的事件组 */
 static EventGroupHandle_t s_cam_event;
 #define CAM_START_BIT   BIT0    /* 置位：有客户端，开始采集 */
+
+/*
+ * 时间戳 OSD 总开关。
+ * 默认关闭；保持 false 时不生成时间文本、不写入帧缓冲，原工程视频链路行为不变。
+ * 如需临时启用第一版 OSD，可将该变量改为 true。
+ */
+static bool s_osd_timestamp_enabled = CAM_OSD_TIMESTAMP_DEFAULT_ENABLE;
+static bool s_osd_frame_len_warned;
+
+/* ------------------------------------------------------------------ */
+/* 轻量 OSD                                                             */
+/* ------------------------------------------------------------------ */
+
+static const uint8_t *camera_osd_get_glyph(char ch)
+{
+    static const uint8_t glyph_blank[CAM_OSD_FONT_HEIGHT] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    static const uint8_t glyph_0[CAM_OSD_FONT_HEIGHT] = {
+        0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E,
+    };
+    static const uint8_t glyph_1[CAM_OSD_FONT_HEIGHT] = {
+        0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E,
+    };
+    static const uint8_t glyph_2[CAM_OSD_FONT_HEIGHT] = {
+        0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F,
+    };
+    static const uint8_t glyph_3[CAM_OSD_FONT_HEIGHT] = {
+        0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E,
+    };
+    static const uint8_t glyph_4[CAM_OSD_FONT_HEIGHT] = {
+        0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02,
+    };
+    static const uint8_t glyph_5[CAM_OSD_FONT_HEIGHT] = {
+        0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E,
+    };
+    static const uint8_t glyph_6[CAM_OSD_FONT_HEIGHT] = {
+        0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E,
+    };
+    static const uint8_t glyph_7[CAM_OSD_FONT_HEIGHT] = {
+        0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08,
+    };
+    static const uint8_t glyph_8[CAM_OSD_FONT_HEIGHT] = {
+        0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E,
+    };
+    static const uint8_t glyph_9[CAM_OSD_FONT_HEIGHT] = {
+        0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C,
+    };
+    static const uint8_t glyph_dash[CAM_OSD_FONT_HEIGHT] = {
+        0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00,
+    };
+    static const uint8_t glyph_colon[CAM_OSD_FONT_HEIGHT] = {
+        0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00,
+    };
+
+    switch (ch) {
+        case '0': return glyph_0;
+        case '1': return glyph_1;
+        case '2': return glyph_2;
+        case '3': return glyph_3;
+        case '4': return glyph_4;
+        case '5': return glyph_5;
+        case '6': return glyph_6;
+        case '7': return glyph_7;
+        case '8': return glyph_8;
+        case '9': return glyph_9;
+        case '-': return glyph_dash;
+        case ':': return glyph_colon;
+        case ' ': return glyph_blank;
+        default:  return glyph_blank;
+    }
+}
+
+static uint32_t camera_osd_text_width(const char *text)
+{
+    size_t len;
+
+    if (!text || text[0] == '\0') {
+        return 0;
+    }
+
+    len = strlen(text);
+    return (uint32_t)((len * CAM_OSD_FONT_WIDTH +
+                       (len - 1U) * CAM_OSD_CHAR_SPACING) * CAM_OSD_FONT_SCALE);
+}
+
+static void camera_osd_set_luma(uint8_t *frame, uint32_t width,
+                                uint32_t x, uint32_t y, uint8_t luma)
+{
+    size_t row_stride = (size_t)width * 3U / 2U;
+    size_t offset = (size_t)y * row_stride + (size_t)(x / 2U) * 3U + 1U + (x & 1U);
+
+    frame[offset] = luma;
+}
+
+static void camera_osd_fill_rect(uint8_t *frame, uint32_t width, uint32_t height,
+                                 uint32_t x, uint32_t y,
+                                 uint32_t rect_w, uint32_t rect_h,
+                                 uint8_t luma)
+{
+    uint32_t x_end;
+    uint32_t y_end;
+
+    if (!frame || x >= width || y >= height) {
+        return;
+    }
+
+    x_end = x + rect_w;
+    y_end = y + rect_h;
+    if (x_end > width || x_end < x) {
+        x_end = width;
+    }
+    if (y_end > height || y_end < y) {
+        y_end = height;
+    }
+
+    for (uint32_t py = y; py < y_end; py++) {
+        for (uint32_t px = x; px < x_end; px++) {
+            camera_osd_set_luma(frame, width, px, py, luma);
+        }
+    }
+}
+
+static void camera_osd_draw_char(uint8_t *frame, uint32_t width, uint32_t height,
+                                 uint32_t x, uint32_t y, char ch, uint8_t luma)
+{
+    const uint8_t *glyph = camera_osd_get_glyph(ch);
+
+    for (uint32_t row = 0; row < CAM_OSD_FONT_HEIGHT; row++) {
+        for (uint32_t col = 0; col < CAM_OSD_FONT_WIDTH; col++) {
+            if ((glyph[row] & (1U << (CAM_OSD_FONT_WIDTH - 1U - col))) == 0U) {
+                continue;
+            }
+
+            camera_osd_fill_rect(frame, width, height,
+                                 x + col * CAM_OSD_FONT_SCALE,
+                                 y + row * CAM_OSD_FONT_SCALE,
+                                 CAM_OSD_FONT_SCALE, CAM_OSD_FONT_SCALE,
+                                 luma);
+        }
+    }
+}
+
+static void camera_osd_draw_text(uint8_t *frame, uint32_t width, uint32_t height,
+                                 uint32_t x, uint32_t y, const char *text)
+{
+    uint32_t cursor_x = x;
+    uint32_t step = (CAM_OSD_FONT_WIDTH + CAM_OSD_CHAR_SPACING) * CAM_OSD_FONT_SCALE;
+
+    if (!text) {
+        return;
+    }
+
+    for (const char *p = text; *p != '\0'; p++) {
+        camera_osd_draw_char(frame, width, height, cursor_x, y, *p, CAM_OSD_TEXT_LUMA);
+        cursor_x += step;
+    }
+}
+
+static void camera_osd_build_timestamp_text(char *text, size_t text_size)
+{
+    static time_t cached_sec = 0;
+    static bool cached_valid;
+    static char cached_text[CAM_OSD_TIMESTAMP_TEXT_LEN] = {0};
+    struct timeval tv = {0};
+
+    if (!text || text_size == 0U) {
+        return;
+    }
+
+    if (gettimeofday(&tv, NULL) != 0) {
+        snprintf(text, text_size, "---- -- -- --:--:--");
+        return;
+    }
+
+    if (!cached_valid || cached_sec != tv.tv_sec) {
+        if (tv.tv_sec >= CAM_OSD_VALID_UNIX_SEC) {
+            struct tm tm_info = {0};
+            time_t sec = (time_t)tv.tv_sec;
+
+            localtime_r(&sec, &tm_info);
+            if (strftime(cached_text, sizeof(cached_text),
+                         "%Y-%m-%d %H:%M:%S", &tm_info) == 0U) {
+                snprintf(cached_text, sizeof(cached_text), "---- -- -- --:--:--");
+            }
+        } else {
+            snprintf(cached_text, sizeof(cached_text), "---- -- -- --:--:--");
+        }
+
+        cached_sec = tv.tv_sec;
+        cached_valid = true;
+    }
+
+    snprintf(text, text_size, "%s", cached_text);
+}
+
+static void camera_osd_draw_timestamp(uint8_t *frame, size_t frame_len,
+                                      uint32_t width, uint32_t height)
+{
+    size_t expected_len;
+    char timestamp[CAM_OSD_TIMESTAMP_TEXT_LEN] = {0};
+    uint32_t text_w;
+    uint32_t text_h;
+    uint32_t bg_w;
+    uint32_t bg_h;
+
+    if (!s_osd_timestamp_enabled) {
+        return;
+    }
+
+    if (!frame || width == 0U || height == 0U || (width & 1U) != 0U) {
+        return;
+    }
+
+    expected_len = (size_t)width * (size_t)height * 3U / 2U;
+    if (frame_len != 0U && frame_len < expected_len) {
+        if (!s_osd_frame_len_warned) {
+            ESP_LOGW(TAG, "OSD 时间戳跳过：YUV 帧长度不足 %zu < %zu", frame_len, expected_len);
+            s_osd_frame_len_warned = true;
+        }
+        return;
+    }
+
+    camera_osd_build_timestamp_text(timestamp, sizeof(timestamp));
+    text_w = camera_osd_text_width(timestamp);
+    text_h = CAM_OSD_FONT_HEIGHT * CAM_OSD_FONT_SCALE;
+    bg_w = text_w + CAM_OSD_PADDING_X * 2U;
+    bg_h = text_h + CAM_OSD_PADDING_Y * 2U;
+
+    if (CAM_OSD_MARGIN_X + bg_w > width || CAM_OSD_MARGIN_Y + bg_h > height) {
+        return;
+    }
+
+    camera_osd_fill_rect(frame, width, height,
+                         CAM_OSD_MARGIN_X, CAM_OSD_MARGIN_Y,
+                         bg_w, bg_h, CAM_OSD_BG_LUMA);
+    camera_osd_draw_text(frame, width, height,
+                         CAM_OSD_MARGIN_X + CAM_OSD_PADDING_X,
+                         CAM_OSD_MARGIN_Y + CAM_OSD_PADDING_Y,
+                         timestamp);
+}
 
 static void flush_stale_capture_buffers(void)
 {
@@ -544,6 +802,12 @@ static void cam_task(void *arg)
         }
         int64_t t2 = esp_timer_get_time();
         dqbuf_time_total_us += (uint64_t)(t2 - t1);
+
+        /* OSD 必须在 H.264 编码前写入；默认关闭时只保留一次轻量判断。 */
+        if (s_osd_timestamp_enabled) {
+            camera_osd_draw_timestamp(s_cam.buf[v4l2_buf.index], v4l2_buf.bytesused,
+                                      s_cam.width, s_cam.height);
+        }
 
         /* 编码为 H.264 并推送给 RTSP 客户端 */
         size_t h264_len = 0;

@@ -96,7 +96,7 @@ esp_err_t wifi_connect_wait_for_time(int timeout_ms)
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "纯 AP 模式等待网页通过浏览器时间完成校时");
+    ESP_LOGW(TAG, "AP 模式等待网页通过浏览器时间完成校时");
     return ESP_ERR_TIMEOUT;
 }
 
