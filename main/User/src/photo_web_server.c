@@ -3,7 +3,7 @@
  * @brief SD 卡媒体网页浏览模块实现
  *
  * 模块职责：
- *   - 通过 HTTP 服务提供照片和视频浏览网页
+ *   - 通过 HTTP 服务提供照片和录像浏览网页
  *   - 提供网页设备状态读取、波特率/分辨率配置、恢复默认配置和重启接口
  *   - 提供网页拍照接口，请求在推流过程中抓拍一张照片
  *   - 扫描 TF 卡中各次上电目录下的 photo 和 video 子目录
@@ -538,11 +538,11 @@ static const char *s_photo_index_html_v6[] = {
     "    <header class='hero'>\n",
     "      <div>\n",
     "        <h1 class='title'>SD 卡媒体浏览</h1>\n",
-    "        <p class='desc'>浏览 SD 卡中的照片和视频，支持网页拍照、设备状态查看、波特率与分辨率配置以及批量删除操作。</p>\n",
+    "        <p class='desc'>浏览 TF 卡中的照片和录像，支持 MIPI 摄像头与 USB 热像仪切换、网页拍照、设备状态查看和批量删除。</p>\n",
     "      </div>\n",
     "      <div class='toolbar'>\n",
     "        <div id='status' class='badge' role='status' aria-live='polite'>正在读取媒体列表...</div>\n",
-    "        <div id='overview' class='badge' aria-live='polite'>照片 0 张 | 视频 0 段 | 已选 0 项</div>\n",
+    "        <div id='overview' class='badge' aria-live='polite'>照片 0 张 | 录像 0 段 | 已选 0 项</div>\n",
     "        <button id='reload' class='ghostBtn' type='button'>刷新列表</button>\n",
     "        <button id='toggleFoldAll' class='ghostBtn' type='button'>全部折叠</button>\n",
     "        <button id='deleteSelection' class='dangerBtn' type='button'>删除选中</button>\n",
@@ -559,7 +559,8 @@ static const char *s_photo_index_html_v6[] = {
     "        <div class='statusList'>\n",
     "          <div class='statusRow wide'><div class='statusKey'>当前时间</div><div id='deviceCurrentTime' class='statusValue noWrap'>--</div></div>\n",
     "          <div class='statusRow wide'><div class='statusKey'>RTSP 地址</div><div id='deviceRtspUrl' class='statusValue'>--</div></div>\n",
-    "          <div class='statusRow wide'><div class='statusKey'>TCP-UART0</div><div id='deviceTcpUart0Url' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>当前视频源</div><div id='deviceVideoSource' class='statusValue'>--</div></div>\n",
+    "          <div class='statusRow'><div class='statusKey'>TCP-UART0</div><div id='deviceTcpUart0Url' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>TF 卡状态</div><div id='deviceTfStatus' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>TF 读写测速</div><div id='deviceTfSpeed' class='statusValue'>--</div></div>\n",
     "          <div class='statusRow'><div class='statusKey'>TF 总容量</div><div id='deviceTfTotal' class='statusValue'>--</div></div>\n",
@@ -582,14 +583,23 @@ static const char *s_photo_index_html_v6[] = {
     "            <div class='count'>保存后重启生效</div>\n",
     "          </div>\n",
     "        </div>\n",
-    "        <div class='field'>\n",
-    "          <label for='videoProfile'>视频分辨率</label>\n",
-    "          <select id='videoProfile'>\n",
-    "            <option value='1'>1280 x 960</option>\n",
-    "            <option value='2'>1920 x 1080</option>\n",
-    "            <option value='3'>800 x 800</option>\n",
-    "            <option value='4'>800 x 640</option>\n",
-    "          </select>\n",
+    "        <div class='fieldRow'>\n",
+    "          <div class='field'>\n",
+    "            <label for='videoSource'>切换摄像头</label>\n",
+    "            <select id='videoSource'>\n",
+    "              <option value='1'>USB 热像仪</option>\n",
+    "              <option value='0'>MIPI 摄像头</option>\n",
+    "            </select>\n",
+    "          </div>\n",
+    "          <div class='field'>\n",
+    "            <label for='videoProfile'>MIPI 分辨率</label>\n",
+    "            <select id='videoProfile'>\n",
+    "              <option value='1'>1280 x 960</option>\n",
+    "              <option value='2'>1920 x 1080</option>\n",
+    "              <option value='3'>800 x 800</option>\n",
+    "              <option value='4'>800 x 640</option>\n",
+    "            </select>\n",
+    "          </div>\n",
     "        </div>\n",
     "        <div class='fieldRow'>\n",
     "          <div class='field'>\n",
@@ -629,7 +639,7 @@ static const char *s_photo_index_html_v6[] = {
     "          <div class='apInfoItem'><div class='field'><label for='wifiApMask'>子网掩码</label><input id='wifiApMask' type='text' maxlength='15'></div></div>\n",
     "          <div class='apInfoItem'><div class='apInfoLabel'>最大客户端</div><div id='wifiApMaxClients' class='apInfoValue'>--</div></div>\n",
     "        </div>\n",
-    "        <div class='settingHint'>设备当前工作在纯 AP 模式；热点名称、密码、AP 网络地址、波特率和视频分辨率在保存后需要重启设备生效。恢复默认配置不会删除 TF 卡中的照片和视频。</div>\n",
+    "        <div class='settingHint'>设备当前工作在纯 AP 模式；摄像头选择、热点名称、密码、AP 网络地址、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，MIPI 分辨率只对 MIPI 摄像头生效。</div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
     "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
@@ -660,13 +670,13 @@ static const char *s_photo_index_html_v6[] = {
     "        <div class='sectionHead'>\n",
     "          <div class='sectionTitleWrap'>\n",
     "            <button id='videoFoldBtn' class='foldBtn' type='button' aria-controls='videoBody' aria-expanded='true'>收起</button>\n",
-    "            <h2 id='videoHeading'>视频</h2>\n",
+    "            <h2 id='videoHeading'>录像</h2>\n",
     "            <div id='videoCount' class='count'>0 段</div>\n",
     "            <div id='videoSelection' class='miniBadge'>未进入选择</div>\n",
     "            <button id='videoSelectAllBtn' class='ghostBtn' type='button'>全选</button>\n",
     "          </div>\n",
     "          <div class='sectionTools'>\n",
-    "            <button id='videoToggleAllBtn' class='ghostBtn' type='button'>选择视频</button>\n",
+    "            <button id='videoToggleAllBtn' class='ghostBtn' type='button'>选择录像</button>\n",
     "            <button id='videoDeleteSelectedBtn' class='dangerBtn' type='button'>删除选中</button>\n",
     "          </div>\n",
     "        </div>\n",
@@ -692,7 +702,7 @@ static const char *s_photo_index_html_v6[] = {
     "      deviceClockTimer: 0,\n",
     "      deviceStatusTimer: 0,\n",
     "      photo: { title: '照片', unit: '张', empty: 'SD 卡中暂无照片', items: [], selected: new Set(), collapsed: false, selecting: false },\n",
-    "      video: { title: '视频', unit: '段', empty: 'SD 卡中暂无视频', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
+    "      video: { title: '录像', unit: '段', empty: 'TF 卡中暂无录像，RTSP 客户端播放期间会自动保存录像', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
     "    };\n",
     "    const refs = {\n",
     "      status: document.getElementById('status'),\n",
@@ -706,6 +716,7 @@ static const char *s_photo_index_html_v6[] = {
     "        apClients: document.getElementById('deviceApClients'),\n",
     "        rtspUrl: document.getElementById('deviceRtspUrl'),\n",
     "        tcpUart0Url: document.getElementById('deviceTcpUart0Url'),\n",
+    "        videoSourceStatus: document.getElementById('deviceVideoSource'),\n",
     "        tfStatus: document.getElementById('deviceTfStatus'),\n",
     "        tfTotal: document.getElementById('deviceTfTotal'),\n",
     "        tfFree: document.getElementById('deviceTfFree'),\n",
@@ -716,6 +727,7 @@ static const char *s_photo_index_html_v6[] = {
     "        refreshStatusBtn: document.getElementById('refreshStatusBtn'),\n",
     "        syncTimeBtn: document.getElementById('syncTimeBtn'),\n",
     "        rebootBtn: document.getElementById('rebootBtn'),\n",
+    "        videoSource: document.getElementById('videoSource'),\n",
     "        videoProfile: document.getElementById('videoProfile'),\n",
     "        uart0Baud: document.getElementById('uart0Baud'),\n",
     "        uart1Baud: document.getElementById('uart1Baud'),\n",
@@ -879,6 +891,7 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.apClients.textContent = String(Number(info.ap_connected_clients) || 0);\n",
     "      refs.device.rtspUrl.textContent = info.rtsp_url || '--';\n",
     "      refs.device.tcpUart0Url.textContent = info.tcp_uart0_url || '--';\n",
+    "      refs.device.videoSourceStatus.textContent = info.video_source_name || '--';\n",
     "      refs.device.tfStatus.textContent = info.tf_status_text || (tfMounted ? '已挂载' : '未挂载');\n",
     "      refs.device.tfTotal.textContent = tfMounted ? formatSize(Number(info.tf_total_bytes)) : '--';\n",
     "      refs.device.tfFree.textContent = tfMounted ? formatSize(Number(info.tf_free_bytes)) : '--';\n",
@@ -886,12 +899,14 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.tfPhotoCount.textContent = tfMounted ? formatPhotoCount(Number(info.tf_est_photo_count)) : '--';\n",
     "      refs.device.tfSpeed.textContent = info.tf_speed_text || '--';\n",
     "      refs.device.rtspClients.textContent = String(Number(info.active_clients) || 0);\n",
+    "      updateActionStates();\n",
     "    }\n",
     "    function renderDeviceConfig() {\n",
     "      const config = state.deviceConfig;\n",
     "      if (!config) {\n",
     "        return;\n",
     "      }\n",
+    "      refs.device.videoSource.value = String(config.video_source === 0 ? 0 : (config.video_source || 1));\n",
     "      refs.device.videoProfile.value = String(config.video_profile || '1');\n",
     "      refs.device.uart0Baud.value = String(config.uart0_baud_rate || '115200');\n",
     "      refs.device.uart1Baud.value = String(config.uart1_baud_rate || '115200');\n",
@@ -901,12 +916,15 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.wifiApGateway.value = config.wifi_ap_gateway || '';\n",
     "      refs.device.wifiApMask.value = config.wifi_ap_mask || '';\n",
     "      refs.device.wifiApMaxClients.textContent = String(Number(config.wifi_ap_max_connections) || 0);\n",
+    "      updateActionStates();\n",
     "    }\n",
     "    function updateDeviceActions() {\n",
+    "      const videoSource = refs.device.videoSource.value;\n",
     "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
     "      refs.device.syncTimeBtn.disabled = state.busy;\n",
     "      refs.device.rebootBtn.disabled = state.busy;\n",
-    "      refs.device.videoProfile.disabled = state.busy;\n",
+    "      refs.device.videoSource.disabled = state.busy;\n",
+    "      refs.device.videoProfile.disabled = state.busy || videoSource !== '0';\n",
     "      refs.device.uart0Baud.disabled = state.busy;\n",
     "      refs.device.uart1Baud.disabled = state.busy;\n",
     "      refs.device.wifiApSsid.disabled = state.busy;\n",
@@ -918,7 +936,7 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.factoryResetBtn.disabled = state.busy;\n",
     "    }\n",
     "    function updateOverview() {\n",
-    "      refs.overview.textContent = '照片 ' + state.photo.items.length + ' 张 | 视频 ' + state.video.items.length + ' 段 | 已选 ' + totalSelectedCount() + ' 项';\n",
+    "      refs.overview.textContent = '照片 ' + state.photo.items.length + ' 张 | 录像 ' + state.video.items.length + ' 段 | 已选 ' + totalSelectedCount() + ' 项';\n",
     "    }\n",
     "    function updateSectionHeader(kind) {\n",
     "      const info = state[kind];\n",
@@ -940,7 +958,12 @@ static const char *s_photo_index_html_v6[] = {
     "    function updateToolbar() {\n",
     "      const total = totalItemCount();\n",
     "      const selected = totalSelectedCount();\n",
-    "      refs.captureBtn.disabled = state.busy;\n",
+    "      const info = state.deviceStatus || {};\n",
+    "      const tfCanCapture = !!info.tf_can_capture;\n",
+    "      const rtspPlaying = Number(info.active_clients) > 0;\n",
+    "      const canCapture = tfCanCapture && rtspPlaying;\n",
+    "      refs.captureBtn.disabled = state.busy || !canCapture;\n",
+    "      refs.captureBtn.textContent = canCapture ? '立即拍照' : (tfCanCapture ? '连接 RTSP 后拍照' : 'TF 卡不可拍照');\n",
     "      refs.reloadBtn.disabled = state.busy;\n",
     "      refs.toggleFoldAllBtn.disabled = state.busy || total === 0;\n",
     "      refs.toggleFoldAllBtn.textContent = allPanelsCollapsed() ? '全部展开' : '全部折叠';\n",
@@ -1038,7 +1061,7 @@ static const char *s_photo_index_html_v6[] = {
     "      open.href = item.url;\n",
     "      open.target = '_blank';\n",
     "      open.rel = 'noreferrer';\n",
-    "      open.textContent = kind === 'photo' ? '打开图片' : '打开视频';\n",
+    "      open.textContent = kind === 'photo' ? '打开图片' : '打开录像';\n",
     "      actions.appendChild(open);\n",
     "      meta.appendChild(actions);\n",
     "      card.appendChild(thumb);\n",
@@ -1138,6 +1161,7 @@ static const char *s_photo_index_html_v6[] = {
     "    }\n",
     "    async function requestSaveDeviceConfig() {\n",
     "      const params = new URLSearchParams();\n",
+    "      params.set('video_source', refs.device.videoSource.value);\n",
     "      params.set('video_profile', refs.device.videoProfile.value);\n",
     "      params.set('uart0_baud_rate', refs.device.uart0Baud.value);\n",
     "      params.set('uart1_baud_rate', refs.device.uart1Baud.value);\n",
@@ -1401,7 +1425,7 @@ static const char *s_photo_index_html_v6[] = {
     "        if (doneText) {\n",
     "          setStatus(doneText, !!doneIsError);\n",
     "        } else {\n",
-    "          setStatus('照片 ' + state.photo.items.length + ' 张，视频 ' + state.video.items.length + ' 段', false);\n",
+    "          setStatus('照片 ' + state.photo.items.length + ' 张，录像 ' + state.video.items.length + ' 段', false);\n",
     "        }\n",
     "      } catch (error) {\n",
     "        state.photo.items = [];\n",
@@ -1458,6 +1482,7 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.device.rebootBtn.addEventListener('click', rebootDevice);\n",
     "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
     "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
+    "    refs.device.videoSource.addEventListener('change', updateActionStates);\n",
     "    refs.photo.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('photo'));\n",
     "    refs.photo.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('photo'));\n",
     "    refs.video.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('video'));\n",
@@ -2343,7 +2368,7 @@ static esp_err_t photo_web_api_photos_handler(httpd_req_t *req)
 
 static esp_err_t photo_web_api_videos_handler(httpd_req_t *req)
 {
-    return photo_web_api_media_handler(req, "video", "视频",
+    return photo_web_api_media_handler(req, "video", "录像",
                                        photo_web_has_mp4_suffix, "/video/");
 }
 
@@ -2408,6 +2433,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         "{\"current_time\":\"%s\",\"current_unix_ms\":%" PRId64
                         ",\"time_valid\":%s,\"current_ip\":\"%s\",\"current_gw\":\"%s\""
                         ",\"current_mask\":\"%s\",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
+                        ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
                         ",\"wifi_ap_ip\":\"%s\",\"wifi_ap_max_connections\":%d"
                         ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\",\"tcp_uart0_url\":\"%s\""
                         ",\"tcp_uart1_url\":\"%s\",\"ap_connected_clients\":%" PRIu32
@@ -2422,7 +2448,10 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         ",\"tf_speed_text\":\"%s\",\"active_clients\":%" PRIu32 "}",
                         time_text, unix_ms, time_valid ? "true" : "false",
                         ip_text, gw_text, mask_text,
-                        config.wifi_ap_ssid, config.wifi_static_ip, WIFI_AP_MAX_CONNECTIONS,
+                        config.wifi_ap_ssid,
+                        config.video_source,
+                        device_web_config_get_video_source_name(config.video_source),
+                        config.wifi_static_ip, WIFI_AP_MAX_CONNECTIONS,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url,
                         ap_connected_clients,
                         tf_status.tf_mounted ? "true" : "false",
@@ -2454,7 +2483,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
 static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 {
     device_web_config_t config = {0};
-    char resp[768] = {0};
+    char resp[896] = {0};
     int resp_len;
 
     if (!req) {
@@ -2468,6 +2497,7 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 
     resp_len = snprintf(resp, sizeof(resp),
                         "{\"uart0_baud_rate\":%" PRIu32 ",\"uart1_baud_rate\":%" PRIu32
+                        ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
                         ",\"video_profile\":%" PRIu32 ",\"video_profile_name\":\"%s\""
                         ",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
                         ",\"wifi_ap_password\":\"%s\",\"wifi_ap_ip\":\"%s\""
@@ -2476,6 +2506,8 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         ",\"web_url\":\"http://%s/\",\"rtsp_url\":\"rtsp://%s:%d/stream\""
                         ",\"tcp_uart0_url\":\"%s:%d\",\"tcp_uart1_url\":\"%s:%d\"}",
                         config.uart0_baud_rate, config.uart1_baud_rate,
+                        config.video_source,
+                        device_web_config_get_video_source_name(config.video_source),
                         config.video_profile,
                         device_web_config_get_video_profile_name(config.video_profile),
                         config.wifi_ap_ssid, config.wifi_ap_password,
@@ -2518,7 +2550,10 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
         return photo_web_send_json_error(req, "400 Bad Request", "配置请求读取失败");
     }
 
-    ret = photo_web_form_get_u32(body, "video_profile", &config.video_profile);
+    ret = photo_web_form_get_u32(body, "video_source", &config.video_source);
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_u32(body, "video_profile", &config.video_profile);
+    }
     if (ret == ESP_OK) {
         ret = photo_web_form_get_u32(body, "uart0_baud_rate", &config.uart0_baud_rate);
     }

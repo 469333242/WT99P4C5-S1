@@ -18,6 +18,8 @@
  *   串口1   : TCP <设备IP>:8881
  */
 
+#include <inttypes.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
@@ -51,16 +53,6 @@
 #define ETH_STATIC_IP          "169.254.27.100"
 #define ETH_STATIC_GW          "169.254.27.1"
 #define ETH_STATIC_MASK        "255.255.255.0"
-
-/* 视频源选择：两个摄像头不同时工作。
- * 当前默认使用 USB 热像仪；如需切回 OV5647，将 APP_VIDEO_SOURCE 改为 VIDEO_SOURCE_MIPI。
- * 0 = OV5647 MIPI 摄像头
- * 1 = USB 热像仪
- */
-#define VIDEO_SOURCE_MIPI          0
-#define VIDEO_SOURCE_USB_THERMAL   1
-#define APP_VIDEO_SOURCE           VIDEO_SOURCE_USB_THERMAL
-
 
 static const char *TAG = "main";
 
@@ -98,11 +90,12 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   8. RTSP 服务器启动
  *   9. UART TCP 透传服务启动
  *   10. 以太网初始化并等待链路可用
- *   11. 摄像头初始化并开始采集推流
- *   12. 按 APP_VIDEO_SOURCE 选择 MIPI 摄像头或 USB 热像仪 RTSP 链路
+ *   11. 按网页配置选择 MIPI 摄像头或 USB 热像仪 RTSP 链路
  */
 void app_main(void)
 {
+    device_web_config_t app_config = {0};
+
     /* 1. NVS 初始化 */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -114,6 +107,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "设备网页配置初始化失败，将继续使用默认配置: 0x%x", err);
     }
+    device_web_config_get(&app_config);
 
     /* 2. 网络接口与事件循环 */
     esp_netif_init();
@@ -223,25 +217,28 @@ void app_main(void)
     //    ESP_LOGE(TAG, "UART1 透传服务启动失败: 0x%x", err);
     //}
 
-#if APP_VIDEO_SOURCE == VIDEO_SOURCE_MIPI
-    /* 7. 初始化 MIPI 摄像头并开始采集推流 */
-    err = camera_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "摄像头初始化失败: 0x%x", err);
-    }
-#elif APP_VIDEO_SOURCE == VIDEO_SOURCE_USB_THERMAL
-    /* 7. 启动 USB 热像仪 UVC 采集。
-     * 热像仪 RTSP 链路复用同一个 RTSP 服务端，和 MIPI 摄像头不同时工作。 */
-    err = usb_thermal_camera_start();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "USB 热像仪采集启动失败: 0x%x", err);
-    } else {
-        err = usb_thermal_camera_rtsp_init();
+    ESP_LOGI(TAG, "当前视频源: %s",
+             device_web_config_get_video_source_name(app_config.video_source));
+
+    if (app_config.video_source == DEVICE_WEB_CONFIG_VIDEO_SOURCE_MIPI) {
+        /* 7. 初始化 MIPI 摄像头并开始采集推流。 */
+        err = camera_init();
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "USB 热像仪 RTSP 初始化失败: 0x%x", err);
+            ESP_LOGE(TAG, "摄像头初始化失败: 0x%x", err);
         }
+    } else if (app_config.video_source == DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL) {
+        /* 7. 启动 USB 热像仪 UVC 采集。
+         * 热像仪 RTSP 链路复用同一个 RTSP 服务端，和 MIPI 摄像头不同时工作。 */
+        err = usb_thermal_camera_start();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "USB 热像仪采集启动失败: 0x%x", err);
+        } else {
+            err = usb_thermal_camera_rtsp_init();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "USB 热像仪 RTSP 初始化失败: 0x%x", err);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "视频源配置非法，未启动摄像头: %" PRIu32, app_config.video_source);
     }
-#else
-#error "APP_VIDEO_SOURCE 配置错误"
-#endif
 }

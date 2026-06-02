@@ -34,6 +34,7 @@
 #include "esp_private/uvc_stream.h"
 
 #include "rtsp_server.h"
+#include "media_storage.h"
 #include "usb_thermal_camera.h"
 
 static const char *TAG = "usb_thermal";
@@ -43,6 +44,7 @@ static const char *TAG = "usb_thermal";
 /* ------------------------------------------------------------------ */
 #define USB_THERMAL_CAMERA_ENABLE              1       /* USB 热像仪总开关：0=关闭，1=开启 */
 #define USB_THERMAL_CAMERA_PRINT_DESC_ENABLE   0       /* 完整 USB 描述符打印开关：调试 VID/PID 时再开启 */
+#define USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE  0       /* 调试日志开关：开启后打印格式列表、周期统计和转换耗时 */
 #define USB_THERMAL_CAMERA_ALLOW_UNKNOWN_FMT   1       /* 允许尝试 UVC 未识别格式，常见于 Y16/GRAY16 热像仪 */
 #define USB_THERMAL_CAMERA_PERIPHERAL_MAP      0x00    /* USB 外设选择：0=使用 IDF 默认，0x1/0x2 可用于切换控制器 */
 #define USB_THERMAL_CAMERA_READY_DELAY_MS      500     /* USB Host/UVC 安装完成后打开根端口前的稳定等待时间 */
@@ -110,8 +112,10 @@ typedef struct {
     uint32_t invalid_frames;
     uint32_t stats_frames;
     int64_t stats_start_us;
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     int64_t last_gray8_log_us;
     int64_t last_video_log_us;
+#endif
     bool ready;
     bool connected;
     bool first_frame_logged;
@@ -241,6 +245,7 @@ static float uvc_select_request_fps(const uvc_host_frame_info_t *info)
     return fps;
 }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
 static void uvc_log_frame_intervals(const uvc_host_frame_info_t *info)
 {
     if (info->interval_type == 0U) {
@@ -257,10 +262,12 @@ static void uvc_log_frame_intervals(const uvc_host_frame_info_t *info)
                  i, uvc_interval_to_fps(info->interval[i]));
     }
 }
+#endif
 
 static void uvc_log_frame_info_list(const uvc_host_frame_info_t *frame_list,
                                     size_t frame_count)
 {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     ESP_LOGI(TAG, "USB UVC 视频格式列表:");
 
     for (size_t i = 0; i < frame_count; i++) {
@@ -275,6 +282,10 @@ static void uvc_log_frame_info_list(const uvc_host_frame_info_t *frame_list,
                  uvc_interval_to_fps(info->default_interval));
         uvc_log_frame_intervals(info);
     }
+#else
+    (void)frame_list;
+    (void)frame_count;
+#endif
 }
 
 static const uvc_host_frame_info_t *uvc_select_capture_format(const uvc_host_frame_info_t *frame_list,
@@ -439,9 +450,11 @@ static esp_err_t usb_thermal_prepare_latest_buffer(uint32_t width, uint32_t heig
         xSemaphoreGive(s_capture.convert_mutex);
     }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     ESP_LOGI(TAG,
              "USB 热像仪 Y16 帧缓存已准备: %"PRIu32"x%"PRIu32" | 最新帧=%zu 字节 | 转换帧=%zu 字节",
              width, height, s_capture.latest_y16_size, s_capture.convert_y16_size);
+#endif
     return ESP_OK;
 }
 
@@ -462,6 +475,7 @@ static bool usb_thermal_frame_matches_y16(const uvc_host_frame_t *frame)
 
 static void usb_thermal_log_capture_stats_locked(int64_t now_us)
 {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     int64_t elapsed_us;
     float fps;
 
@@ -490,6 +504,9 @@ static void usb_thermal_log_capture_stats_locked(int64_t now_us)
 
     s_capture.stats_start_us = now_us;
     s_capture.stats_frames = 0;
+#else
+    (void)now_us;
+#endif
 }
 
 static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
@@ -547,12 +564,14 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
                          min_value,
                          max_value);
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
                 if (frame->data_len >= 8U) {
                     ESP_LOGI(TAG,
                              "USB 热像仪首帧前 8 字节: %02x %02x %02x %02x %02x %02x %02x %02x",
                              frame->data[0], frame->data[1], frame->data[2], frame->data[3],
                              frame->data[4], frame->data[5], frame->data[6], frame->data[7]);
                 }
+#endif
             }
 
             usb_thermal_log_capture_stats_locked(now_us);
@@ -717,8 +736,9 @@ static void usb_thermal_camera_capture_stream(const usb_thermal_camera_event_t *
                          (size_t)selected->v_res *
                          USB_THERMAL_CAMERA_Y16_BYTES_PER_PIXEL;
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     if (uvc_format_is_unknown(selected->format)) {
-        ESP_LOGW(TAG,
+        ESP_LOGI(TAG,
                  "USB 热像仪格式未被驱动识别，将按 Y16 原始热数据持续采集 | %ux%u | 期望帧长=%zu",
                  selected->h_res,
                  selected->v_res,
@@ -732,6 +752,7 @@ static void usb_thermal_camera_capture_stream(const usb_thermal_camera_event_t *
                  uvc_select_request_fps(selected),
                  expected_frame_len);
     }
+#endif
 
     err = usb_thermal_prepare_latest_buffer(selected->h_res, selected->v_res);
     if (err != ESP_OK) {
@@ -792,6 +813,7 @@ static void usb_thermal_camera_capture_stream(const usb_thermal_camera_event_t *
         xSemaphoreGive(s_capture.frame_mutex);
     }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     uvc_host_stream_format_t active_format = {0};
     if (uvc_host_stream_format_get(stream_hdl, &active_format) == ESP_OK) {
         ESP_LOGI(TAG,
@@ -801,6 +823,7 @@ static void usb_thermal_camera_capture_stream(const usb_thermal_camera_event_t *
                  active_format.v_res,
                  active_format.fps);
     }
+#endif
 
 #if USB_THERMAL_CAMERA_PRINT_DESC_ENABLE
     /* 调试设备枚举信息时可开启，日志较长，默认关闭避免影响正常观察。 */
@@ -821,7 +844,9 @@ static void usb_thermal_camera_capture_stream(const usb_thermal_camera_event_t *
         return;
     }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     ESP_LOGI(TAG, "USB 热像仪持续采集已启动，等待最新 Y16 帧");
+#endif
     free(frame_list);
 }
 
@@ -833,11 +858,13 @@ static void usb_thermal_camera_capture_task(void *arg)
 
     while (1) {
         if (xQueueReceive(s_device_queue, &device_event, portMAX_DELAY) == pdPASS) {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             ESP_LOGI(TAG,
                      "开始打开 USB UVC 视频流 | addr=%u | stream=%u | 格式数=%u",
                      device_event.dev_addr,
                      device_event.stream_index,
                      (unsigned)device_event.frame_info_num);
+#endif
             usb_thermal_camera_capture_stream(&device_event);
         }
     }
@@ -860,11 +887,13 @@ static void usb_thermal_camera_driver_event_callback(const uvc_host_driver_event
                 .frame_info_num = event->device_connected.frame_info_num,
             };
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             ESP_LOGI(TAG,
                      "检测到 USB UVC 视频接口 | addr=%u | stream=%u | 格式数=%u",
                      device_event.dev_addr,
                      device_event.stream_index,
                      (unsigned)device_event.frame_info_num);
+#endif
 
             if (xQueueSend(s_device_queue, &device_event, 0) != pdPASS) {
                 ESP_LOGW(TAG, "USB UVC 事件队列已满，忽略本次设备事件");
@@ -894,9 +923,11 @@ static void usb_host_lib_task(void *arg)
             usb_host_device_free_all();
         }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
         if ((event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) != 0) {
             ESP_LOGI(TAG, "USB 设备资源已释放，继续等待热插拔");
         }
+#endif
     }
 }
 
@@ -912,9 +943,11 @@ static void usb_thermal_rtsp_on_playing(bool playing)
 
     if (playing) {
         rtsp_reset_tx_stats();
+        media_storage_start_video_record();
         xEventGroupSetBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT);
     } else {
         rtsp_reset_tx_stats();
+        media_storage_stop_video_record();
         xEventGroupClearBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT);
     }
 }
@@ -1004,6 +1037,14 @@ static esp_err_t usb_thermal_rtsp_create_encoder(void)
         return ESP_FAIL;
     }
 
+    /* 录像复用当前 H.264 帧，不额外创建第二路编码器。 */
+    esp_err_t media_ret = media_storage_prepare_video_record(s_rtsp.width,
+                                                             s_rtsp.height,
+                                                             USB_THERMAL_CAMERA_RTSP_FPS);
+    if (media_ret != ESP_OK) {
+        ESP_LOGW(TAG, "USB 热像仪录像缓冲准备失败，RTSP 将继续运行: 0x%x", media_ret);
+    }
+
     s_rtsp.encoder_ready = true;
     ESP_LOGI(TAG,
              "USB 热像仪 RTSP 编码资源已创建 | 编码 %"PRIu32"x%"PRIu32"@%"PRIu32"fps | raw=%zu | h264=%zu",
@@ -1078,11 +1119,13 @@ static void usb_thermal_pad_oue_vyy_frame(uint8_t *frame_buf,
 
 static void usb_thermal_rtsp_task(void *arg)
 {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     uint32_t encoded_frame_cnt = 0;
     uint64_t convert_time_total_us = 0;
     uint64_t encode_time_total_us = 0;
     uint64_t push_time_total_us = 0;
     int64_t report_start_us = 0;
+#endif
     TickType_t frame_delay_ticks = pdMS_TO_TICKS(1000U / USB_THERMAL_CAMERA_RTSP_FPS);
 
     (void)arg;
@@ -1108,6 +1151,7 @@ static void usb_thermal_rtsp_task(void *arg)
             }
         }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
         if (report_start_us == 0) {
             report_start_us = esp_timer_get_time();
             encoded_frame_cnt = 0;
@@ -1115,9 +1159,12 @@ static void usb_thermal_rtsp_task(void *arg)
             encode_time_total_us = 0;
             push_time_total_us = 0;
         }
+#endif
 
         usb_thermal_camera_frame_info_t frame_info = {0};
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
         int64_t t1 = esp_timer_get_time();
+#endif
         esp_err_t ret = usb_thermal_camera_get_latest_gray_oue_vyy(s_rtsp.raw_buf,
                                                                    s_rtsp.raw_buf_size,
                                                                    &frame_info);
@@ -1136,12 +1183,20 @@ static void usb_thermal_rtsp_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(USB_THERMAL_CAMERA_RTSP_READY_WAIT_MS));
             continue;
         }
+        /* 拍照只保存热像仪实际 390 行图像，底部补黑边仅用于 H.264 宏块对齐。 */
+        media_storage_process_camera_frame(s_rtsp.raw_buf,
+                                           (size_t)s_rtsp.width *
+                                           (size_t)USB_THERMAL_CAMERA_RTSP_SRC_HEIGHT * 3U / 2U,
+                                           s_rtsp.width,
+                                           USB_THERMAL_CAMERA_RTSP_SRC_HEIGHT);
         usb_thermal_pad_oue_vyy_frame(s_rtsp.raw_buf,
                                       s_rtsp.width,
                                       USB_THERMAL_CAMERA_RTSP_SRC_HEIGHT,
                                       s_rtsp.height);
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
         int64_t t2 = esp_timer_get_time();
         convert_time_total_us += (uint64_t)(t2 - t1);
+#endif
 
         size_t h264_len = 0;
         esp_h264_frame_type_t frame_type = ESP_H264_FRAME_TYPE_INVALID;
@@ -1152,18 +1207,25 @@ static void usb_thermal_rtsp_task(void *arg)
                                          &h264_len,
                                          &frame_type,
                                          &frame_pts);
-        int64_t t3 = esp_timer_get_time();
-        encode_time_total_us += (uint64_t)(t3 - t2);
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
+        int64_t t_encode_done = esp_timer_get_time();
+        encode_time_total_us += (uint64_t)(t_encode_done - t2);
+#endif
 
         if (ret == ESP_OK && h264_len > 0U) {
             rtsp_push_h264_frame(s_rtsp.h264_out_buf, h264_len, frame_type, frame_pts);
-            int64_t t4 = esp_timer_get_time();
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
+            int64_t t_push_done = esp_timer_get_time();
 
-            push_time_total_us += (uint64_t)(t4 - t3);
+            push_time_total_us += (uint64_t)(t_push_done - t_encode_done);
             encoded_frame_cnt++;
+#endif
 
-            if ((t4 - report_start_us) >= (int64_t)USB_THERMAL_CAMERA_RTSP_STATS_US) {
-                uint32_t elapsed_ms = (uint32_t)((t4 - report_start_us) / 1000);
+            media_storage_process_h264_frame(s_rtsp.h264_out_buf, h264_len, frame_type, frame_pts);
+
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
+            if ((t_push_done - report_start_us) >= (int64_t)USB_THERMAL_CAMERA_RTSP_STATS_US) {
+                uint32_t elapsed_ms = (uint32_t)((t_push_done - report_start_us) / 1000);
                 rtsp_tx_stats_t tx_stats = {0};
                 float encoded_fps = 0.0f;
                 float actual_fps = 0.0f;
@@ -1194,18 +1256,21 @@ static void usb_thermal_rtsp_task(void *arg)
                              (double)push_time_total_us / (1000.0 * encoded_frame_cnt));
                 }
 
-                report_start_us = t4;
+                report_start_us = t_push_done;
                 encoded_frame_cnt = 0;
                 convert_time_total_us = 0;
                 encode_time_total_us = 0;
                 push_time_total_us = 0;
             }
+#endif
         } else if (ret != ESP_OK) {
             ESP_LOGW(TAG, "USB 热像仪 H.264 编码失败，跳过当前帧");
         }
 
         if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_RTSP_START_BIT) == 0) {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             report_start_us = 0;
+#endif
             vTaskDelay(pdMS_TO_TICKS(USB_THERMAL_CAMERA_RTSP_IDLE_RELEASE_MS));
             if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_RTSP_START_BIT) == 0) {
                 ESP_LOGI(TAG, "USB 热像仪 RTSP 无客户端，释放编码资源");
@@ -1496,8 +1561,10 @@ esp_err_t usb_thermal_camera_get_latest_gray8(uint8_t *out_buf, size_t out_buf_s
     uint16_t max_value = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     int64_t start_us = 0;
     int64_t end_us = 0;
+#endif
     usb_thermal_camera_frame_info_t frame_info = {0};
 
     if (!out_buf) {
@@ -1541,17 +1608,22 @@ esp_err_t usb_thermal_camera_get_latest_gray8(uint8_t *out_buf, size_t out_buf_s
         if (local_y16_size < pixels * USB_THERMAL_CAMERA_Y16_BYTES_PER_PIXEL) {
             ret = ESP_ERR_INVALID_SIZE;
         } else {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             start_us = esp_timer_get_time();
+#endif
             for (size_t i = 0; i < pixels; i++) {
                 uint16_t value = usb_thermal_read_y16_le(local_y16 + i * USB_THERMAL_CAMERA_Y16_BYTES_PER_PIXEL);
                 out_buf[i] = usb_thermal_y16_to_gray(value, min_value, max_value);
             }
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             end_us = esp_timer_get_time();
+#endif
 
             if (out_info) {
                 *out_info = frame_info;
             }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             if (xSemaphoreTake(s_capture.frame_mutex, pdMS_TO_TICKS(USB_THERMAL_CAMERA_FRAME_WAIT_MS)) == pdTRUE) {
                 if ((end_us - s_capture.last_gray8_log_us) >= (int64_t)USB_THERMAL_CAMERA_CONVERT_LOG_US) {
                     s_capture.last_gray8_log_us = end_us;
@@ -1565,6 +1637,7 @@ esp_err_t usb_thermal_camera_get_latest_gray8(uint8_t *out_buf, size_t out_buf_s
                 }
                 xSemaphoreGive(s_capture.frame_mutex);
             }
+#endif
         }
     }
 
@@ -1588,8 +1661,10 @@ esp_err_t usb_thermal_camera_get_latest_gray_oue_vyy(uint8_t *out_buf, size_t ou
     uint16_t max_value = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
     int64_t start_us = 0;
     int64_t end_us = 0;
+#endif
     usb_thermal_camera_frame_info_t frame_info = {0};
 
     if (!out_buf) {
@@ -1636,7 +1711,9 @@ esp_err_t usb_thermal_camera_get_latest_gray_oue_vyy(uint8_t *out_buf, size_t ou
         if (local_y16_size < (size_t)width * (size_t)height * USB_THERMAL_CAMERA_Y16_BYTES_PER_PIXEL) {
             ret = ESP_ERR_INVALID_SIZE;
         } else {
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             start_us = esp_timer_get_time();
+#endif
             for (uint32_t y = 0; y < height; y++) {
                 const uint8_t *src_row = local_y16 +
                                          (size_t)y * (size_t)width * USB_THERMAL_CAMERA_Y16_BYTES_PER_PIXEL;
@@ -1652,12 +1729,15 @@ esp_err_t usb_thermal_camera_get_latest_gray_oue_vyy(uint8_t *out_buf, size_t ou
                     dst_row[dst_offset + 2U] = usb_thermal_y16_to_gray(value1, min_value, max_value);
                 }
             }
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             end_us = esp_timer_get_time();
+#endif
 
             if (out_info) {
                 *out_info = frame_info;
             }
 
+#if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             if (xSemaphoreTake(s_capture.frame_mutex, pdMS_TO_TICKS(USB_THERMAL_CAMERA_FRAME_WAIT_MS)) == pdTRUE) {
                 if ((end_us - s_capture.last_video_log_us) >= (int64_t)USB_THERMAL_CAMERA_CONVERT_LOG_US) {
                     s_capture.last_video_log_us = end_us;
@@ -1670,6 +1750,7 @@ esp_err_t usb_thermal_camera_get_latest_gray_oue_vyy(uint8_t *out_buf, size_t ou
                 }
                 xSemaphoreGive(s_capture.frame_mutex);
             }
+#endif
         }
     }
 

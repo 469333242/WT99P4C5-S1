@@ -4,6 +4,7 @@
  *
  * 负责持久化保存可由网页修改的设备参数，包括：
  *   - UART0/UART1 波特率
+ *   - 视频源选择
  *   - 视频分辨率档位
  *   - AP 热点名称、密码与网络地址
  *
@@ -26,6 +27,11 @@ extern "C" {
 #define DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN 64
 
 typedef enum {
+    DEVICE_WEB_CONFIG_VIDEO_SOURCE_MIPI = 0,
+    DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL = 1,
+} device_web_config_video_source_t;
+
+typedef enum {
     DEVICE_WEB_CONFIG_VIDEO_PROFILE_1280X960 = 1,
     DEVICE_WEB_CONFIG_VIDEO_PROFILE_1920X1080 = 2,
     DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X800 = 3,
@@ -35,6 +41,7 @@ typedef enum {
 typedef struct {
     uint32_t uart0_baud_rate;
     uint32_t uart1_baud_rate;
+    uint32_t video_source;
     uint32_t video_profile;
     char     wifi_ap_ssid[DEVICE_WEB_CONFIG_WIFI_SSID_LEN];
     char     wifi_ap_password[DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN];
@@ -87,6 +94,11 @@ esp_err_t device_web_config_reset_to_factory(void);
 bool device_web_config_is_valid_video_profile(uint32_t video_profile);
 
 /**
+ * @brief 判断视频源是否合法
+ */
+bool device_web_config_is_valid_video_source(uint32_t video_source);
+
+/**
  * @brief 判断波特率是否合法
  */
 bool device_web_config_is_valid_baud_rate(uint32_t baud_rate);
@@ -100,6 +112,11 @@ bool device_web_config_is_valid_ipv4_text(const char *text);
  * @brief 获取视频分辨率档位名称
  */
 const char *device_web_config_get_video_profile_name(uint32_t video_profile);
+
+/**
+ * @brief 获取视频源名称
+ */
+const char *device_web_config_get_video_source_name(uint32_t video_source);
 
 #ifdef __cplusplus
 }

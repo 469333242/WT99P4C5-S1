@@ -70,6 +70,7 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_DATE_TAG_LEN            9
 #define MEDIA_STORAGE_TIMESTAMP_LEN           32
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN         60
+#define MEDIA_STORAGE_VIDEO_QUEUE_LEN_LOW_RES 24
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_1080P   12
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    30
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
@@ -77,6 +78,8 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
 #define MEDIA_STORAGE_VIDEO_TIMESCALE         90000U
 #define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE    (128U * 1024U)
+#define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE_LOW_RES (96U * 1024U)
+#define MEDIA_STORAGE_VIDEO_LOW_RES_PIXELS    (512U * 400U)
 #define MEDIA_STORAGE_VIDEO_DROP_LOG_MS       1000
 #define MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL 1U
 #define MEDIA_STORAGE_VIDEO_ADAPTIVE_INTERVAL_MAX 1U
@@ -208,13 +211,16 @@ static size_t media_storage_rgb565_size(uint32_t width, uint32_t height)
 
 static size_t media_storage_calc_video_frame_buf_size(uint32_t width, uint32_t height)
 {
-    (void)width;
-    (void)height;
+    const uint32_t pixels = width * height;
 
     /*
-     * Store compressed H.264 frames only. 128 KB keeps the 45-slot pool
-     * below the previous 24 x 256 KB footprint while still leaving IDR margin.
+     * 录像只保存压缩后的 H.264 帧。热像仪 512x400 灰度流帧长较小，
+     * 使用低分辨率缓冲可减少 RTSP 播放时的瞬时内存压力。
      */
+    if (pixels <= MEDIA_STORAGE_VIDEO_LOW_RES_PIXELS) {
+        return media_storage_align_size(MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE_LOW_RES);
+    }
+
     return media_storage_align_size(MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE);
 }
 
@@ -227,6 +233,9 @@ static uint32_t media_storage_calc_video_slot_count(uint32_t width, uint32_t hei
     }
     if (pixels >= (1280U * 960U)) {
         return MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA;
+    }
+    if (pixels <= MEDIA_STORAGE_VIDEO_LOW_RES_PIXELS) {
+        return MEDIA_STORAGE_VIDEO_QUEUE_LEN_LOW_RES;
     }
 
     return MEDIA_STORAGE_VIDEO_QUEUE_LEN;
