@@ -22,6 +22,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -48,6 +49,8 @@
 #define WIFI_WAIT_SLICE_MS         15000
 #define WIFI_TIME_WAIT_MS          8000
 #define ETH_IP_WAIT_SLICE_MS       15000
+#define MIPI_CAMERA_START_TASK_STACK_SIZE (12 * 1024)
+#define MIPI_CAMERA_START_TASK_PRIORITY   (tskIDLE_PRIORITY + 4)
 
 #define ETH_USE_STATIC_IP      true
 #define ETH_STATIC_IP          "169.254.27.100"
@@ -58,6 +61,27 @@ static const char *TAG = "main";
 
 /* 用于等待 SDIO transport 就绪的二值信号量 */
 static SemaphoreHandle_t s_hosted_up_sem;
+
+/**
+ * @brief MIPI 摄像头初始化任务
+ *
+ * esp_video_init 和 OV5647 初始化阶段栈占用较高，不能直接压在默认 main 任务栈上。
+ * 用独立大栈任务完成初始化，初始化成功后 camera_init() 会创建实际采集任务。
+ */
+static void mipi_camera_start_task(void *arg)
+{
+    esp_err_t err;
+
+    (void)arg;
+
+    ESP_LOGI(TAG, "MIPI 摄像头初始化任务已启动");
+    err = camera_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "摄像头初始化失败: 0x%x", err);
+    }
+
+    vTaskDelete(NULL);
+}
 
 /**
  * @brief ESP-Hosted 事件回调
@@ -219,10 +243,16 @@ void app_main(void)
              device_web_config_get_video_source_name(app_config.video_source));
 
     if (app_config.video_source == DEVICE_WEB_CONFIG_VIDEO_SOURCE_MIPI) {
-        /* 7. 初始化 MIPI 摄像头并开始采集推流。 */
-        err = camera_init();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "摄像头初始化失败: 0x%x", err);
+        /* 7. MIPI 初始化栈占用较高，放到独立大栈任务中执行，避免 main 任务栈溢出。 */
+        BaseType_t task_ret = xTaskCreatePinnedToCore(mipi_camera_start_task,
+                                                      "mipi_cam_start",
+                                                      MIPI_CAMERA_START_TASK_STACK_SIZE,
+                                                      NULL,
+                                                      MIPI_CAMERA_START_TASK_PRIORITY,
+                                                      NULL,
+                                                      1);
+        if (task_ret != pdPASS) {
+            ESP_LOGE(TAG, "创建 MIPI 摄像头初始化任务失败");
         }
     } else if (app_config.video_source == DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL) {
         /* 7. 启动 USB 热像仪 UVC 采集。
