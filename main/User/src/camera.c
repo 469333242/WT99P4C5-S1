@@ -981,8 +981,8 @@ esp_err_t camera_init(void)
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width = s_cam.profile.width;
     fmt.fmt.pix.height = s_cam.profile.height;
-    fmt.fmt.pix.pixelformat = 0x32315559;  /* YUV 4:2:0 */
-
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    
     if (ioctl(s_cam.fd, VIDIOC_S_FMT, &fmt) != 0) {
         ESP_LOGE(TAG, "设置 YUV420 格式失败");
         return ESP_FAIL;

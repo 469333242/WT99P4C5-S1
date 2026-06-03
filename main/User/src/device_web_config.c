@@ -20,9 +20,11 @@ static const char *TAG = "device_web_cfg";
 #define DEVICE_WEB_CONFIG_NVS_NAMESPACE    "device_web_cfg"
 #define DEVICE_WEB_CONFIG_NVS_KEY_CONFIG   "config"
 #define DEVICE_WEB_CONFIG_MAGIC            0x44574346U
-#define DEVICE_WEB_CONFIG_VERSION          3U
+#define DEVICE_WEB_CONFIG_VERSION          5U
 #define DEVICE_WEB_CONFIG_VERSION_LEGACY   1U
 #define DEVICE_WEB_CONFIG_VERSION_V2       2U
+#define DEVICE_WEB_CONFIG_VERSION_V3       3U
+#define DEVICE_WEB_CONFIG_VERSION_V4       4U
 #define DEVICE_WEB_CONFIG_MIN_BAUD_RATE    1200U
 #define DEVICE_WEB_CONFIG_MAX_BAUD_RATE    2000000U
 
@@ -49,6 +51,19 @@ typedef struct {
 } device_web_config_v2_t;
 
 typedef struct {
+    uint32_t uart0_baud_rate;
+    uint32_t uart1_baud_rate;
+    uint32_t video_source;
+    uint32_t video_profile;
+    char     wifi_ap_ssid[DEVICE_WEB_CONFIG_WIFI_SSID_LEN];
+    char     wifi_ap_password[DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN];
+    bool     wifi_use_static_ip;
+    char     wifi_static_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+    char     wifi_static_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+    char     wifi_static_mask[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+} device_web_config_v3_t;
+
+typedef struct {
     uint32_t            magic;
     uint32_t            version;
     device_web_config_t config;
@@ -66,6 +81,12 @@ typedef struct {
     uint32_t               version;
     device_web_config_v2_t config;
 } device_web_config_storage_v2_t;
+
+typedef struct {
+    uint32_t               magic;
+    uint32_t               version;
+    device_web_config_v3_t config;
+} device_web_config_storage_v3_t;
 
 static SemaphoreHandle_t s_device_web_config_mutex;
 static device_web_config_storage_t s_device_web_config_storage;
@@ -202,6 +223,124 @@ static bool device_web_config_import_v2(const device_web_config_storage_v2_t *le
     return device_web_config_validate(out_config);
 }
 
+static bool device_web_config_import_v3(const device_web_config_storage_v3_t *legacy,
+                                        device_web_config_t *out_config)
+{
+    if (!legacy || !out_config ||
+        legacy->magic != DEVICE_WEB_CONFIG_MAGIC ||
+        legacy->version != DEVICE_WEB_CONFIG_VERSION_V3) {
+        return false;
+    }
+
+    device_web_config_get_defaults(out_config);
+    out_config->uart0_baud_rate = legacy->config.uart0_baud_rate;
+    out_config->uart1_baud_rate = legacy->config.uart1_baud_rate;
+    out_config->video_source = legacy->config.video_source;
+    out_config->video_profile = legacy->config.video_profile;
+    out_config->wifi_mode = DEVICE_WEB_CONFIG_WIFI_MODE_AP;
+    out_config->wifi_use_static_ip = legacy->config.wifi_use_static_ip;
+    device_web_config_copy_text(out_config->wifi_ap_ssid, sizeof(out_config->wifi_ap_ssid),
+                                legacy->config.wifi_ap_ssid);
+    device_web_config_copy_text(out_config->wifi_ap_password, sizeof(out_config->wifi_ap_password),
+                                legacy->config.wifi_ap_password);
+    device_web_config_copy_text(out_config->wifi_static_ip, sizeof(out_config->wifi_static_ip),
+                                legacy->config.wifi_static_ip);
+    device_web_config_copy_text(out_config->wifi_static_gw, sizeof(out_config->wifi_static_gw),
+                                legacy->config.wifi_static_gw);
+    device_web_config_copy_text(out_config->wifi_static_mask, sizeof(out_config->wifi_static_mask),
+                                legacy->config.wifi_static_mask);
+
+    return device_web_config_validate(out_config);
+}
+
+static bool device_web_config_import_v4(const device_web_config_storage_t *legacy,
+                                        device_web_config_t *out_config)
+{
+    device_web_config_t defaults;
+    bool sta_ssid_valid;
+
+    if (!legacy || !out_config ||
+        legacy->magic != DEVICE_WEB_CONFIG_MAGIC ||
+        legacy->version != DEVICE_WEB_CONFIG_VERSION_V4) {
+        return false;
+    }
+
+    device_web_config_get_defaults(&defaults);
+    *out_config = legacy->config;
+
+    if (!device_web_config_is_valid_baud_rate(out_config->uart0_baud_rate)) {
+        out_config->uart0_baud_rate = defaults.uart0_baud_rate;
+    }
+    if (!device_web_config_is_valid_baud_rate(out_config->uart1_baud_rate)) {
+        out_config->uart1_baud_rate = defaults.uart1_baud_rate;
+    }
+    if (!device_web_config_is_valid_video_source(out_config->video_source)) {
+        out_config->video_source = defaults.video_source;
+    }
+    if (!device_web_config_is_valid_video_profile(out_config->video_profile)) {
+        out_config->video_profile = defaults.video_profile;
+    }
+    if (!device_web_config_is_valid_wifi_mode(out_config->wifi_mode)) {
+        out_config->wifi_mode = defaults.wifi_mode;
+    }
+
+    if (!device_web_config_is_valid_wifi_text(out_config->wifi_ap_ssid, 1U,
+                                              DEVICE_WEB_CONFIG_WIFI_SSID_LEN)) {
+        device_web_config_copy_text(out_config->wifi_ap_ssid, sizeof(out_config->wifi_ap_ssid),
+                                    defaults.wifi_ap_ssid);
+    }
+    if (!device_web_config_is_valid_wifi_text(out_config->wifi_ap_password, 8U,
+                                              DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN)) {
+        device_web_config_copy_text(out_config->wifi_ap_password, sizeof(out_config->wifi_ap_password),
+                                    defaults.wifi_ap_password);
+    }
+
+    out_config->wifi_use_static_ip = true;
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_static_ip)) {
+        device_web_config_copy_text(out_config->wifi_static_ip, sizeof(out_config->wifi_static_ip),
+                                    defaults.wifi_static_ip);
+    }
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_static_gw)) {
+        device_web_config_copy_text(out_config->wifi_static_gw, sizeof(out_config->wifi_static_gw),
+                                    defaults.wifi_static_gw);
+    }
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_static_mask)) {
+        device_web_config_copy_text(out_config->wifi_static_mask, sizeof(out_config->wifi_static_mask),
+                                    defaults.wifi_static_mask);
+    }
+
+    /* V4 的 STA 默认 SSID/密码为空，迁移时补齐为当前预置的入网参数。 */
+    sta_ssid_valid = device_web_config_is_valid_wifi_text(out_config->wifi_sta_ssid, 1U,
+                                                          DEVICE_WEB_CONFIG_WIFI_SSID_LEN);
+    if (!sta_ssid_valid) {
+        device_web_config_copy_text(out_config->wifi_sta_ssid, sizeof(out_config->wifi_sta_ssid),
+                                    defaults.wifi_sta_ssid);
+        device_web_config_copy_text(out_config->wifi_sta_password, sizeof(out_config->wifi_sta_password),
+                                    defaults.wifi_sta_password);
+    } else if (!device_web_config_is_valid_wifi_text(out_config->wifi_sta_password, 0U,
+                                                     DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN) ||
+               (strlen(out_config->wifi_sta_password) > 0U &&
+                strlen(out_config->wifi_sta_password) < 8U)) {
+        device_web_config_copy_text(out_config->wifi_sta_password, sizeof(out_config->wifi_sta_password),
+                                    defaults.wifi_sta_password);
+    }
+
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_sta_ip)) {
+        device_web_config_copy_text(out_config->wifi_sta_ip, sizeof(out_config->wifi_sta_ip),
+                                    defaults.wifi_sta_ip);
+    }
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_sta_gw)) {
+        device_web_config_copy_text(out_config->wifi_sta_gw, sizeof(out_config->wifi_sta_gw),
+                                    defaults.wifi_sta_gw);
+    }
+    if (!device_web_config_is_valid_ipv4_text(out_config->wifi_sta_mask)) {
+        device_web_config_copy_text(out_config->wifi_sta_mask, sizeof(out_config->wifi_sta_mask),
+                                    defaults.wifi_sta_mask);
+    }
+
+    return device_web_config_validate(out_config);
+}
+
 static bool device_web_config_validate(const device_web_config_t *config)
 {
     if (!config) {
@@ -218,6 +357,10 @@ static bool device_web_config_validate(const device_web_config_t *config)
         return false;
     }
 
+    if (!device_web_config_is_valid_wifi_mode(config->wifi_mode)) {
+        return false;
+    }
+
     if (!device_web_config_is_valid_wifi_text(config->wifi_ap_ssid, 1U,
                                               DEVICE_WEB_CONFIG_WIFI_SSID_LEN) ||
         !device_web_config_is_valid_wifi_text(config->wifi_ap_password, 8U,
@@ -230,6 +373,27 @@ static bool device_web_config_validate(const device_web_config_t *config)
         !device_web_config_is_valid_ipv4_text(config->wifi_static_gw) ||
         !device_web_config_is_valid_ipv4_text(config->wifi_static_mask)) {
         return false;
+    }
+
+    if (config->wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+        if (!device_web_config_is_valid_wifi_text(config->wifi_sta_ssid, 1U,
+                                                  DEVICE_WEB_CONFIG_WIFI_SSID_LEN) ||
+            !device_web_config_is_valid_wifi_text(config->wifi_sta_password, 0U,
+                                                  DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN)) {
+            return false;
+        }
+
+        if (strlen(config->wifi_sta_password) > 0U &&
+            strlen(config->wifi_sta_password) < 8U) {
+            return false;
+        }
+
+        if (config->wifi_sta_use_static_ip &&
+            (!device_web_config_is_valid_ipv4_text(config->wifi_sta_ip) ||
+             !device_web_config_is_valid_ipv4_text(config->wifi_sta_gw) ||
+             !device_web_config_is_valid_ipv4_text(config->wifi_sta_mask))) {
+            return false;
+        }
     }
 
     return true;
@@ -250,6 +414,7 @@ void device_web_config_get_defaults(device_web_config_t *out_config)
     out_config->uart1_baud_rate = UART_BAUD_RATE;
     out_config->video_source = DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL;
     out_config->video_profile = device_web_config_default_video_profile();
+    out_config->wifi_mode = DEVICE_WEB_CONFIG_WIFI_MODE_AP;
     out_config->wifi_use_static_ip = wifi_profile.use_static_ip;
 
     device_web_config_copy_text(out_config->wifi_ap_ssid, sizeof(out_config->wifi_ap_ssid),
@@ -262,6 +427,17 @@ void device_web_config_get_defaults(device_web_config_t *out_config)
                                 wifi_profile.gw);
     device_web_config_copy_text(out_config->wifi_static_mask, sizeof(out_config->wifi_static_mask),
                                 wifi_profile.mask);
+    device_web_config_copy_text(out_config->wifi_sta_ssid, sizeof(out_config->wifi_sta_ssid),
+                                WIFI_STA_SSID);
+    device_web_config_copy_text(out_config->wifi_sta_password, sizeof(out_config->wifi_sta_password),
+                                WIFI_STA_PASSWORD);
+    out_config->wifi_sta_use_static_ip = WIFI_STA_USE_STATIC_IP;
+    device_web_config_copy_text(out_config->wifi_sta_ip, sizeof(out_config->wifi_sta_ip),
+                                WIFI_STA_IP);
+    device_web_config_copy_text(out_config->wifi_sta_gw, sizeof(out_config->wifi_sta_gw),
+                                WIFI_STA_GW);
+    device_web_config_copy_text(out_config->wifi_sta_mask, sizeof(out_config->wifi_sta_mask),
+                                WIFI_STA_MASK);
 }
 
 bool device_web_config_is_valid_video_profile(uint32_t video_profile)
@@ -301,6 +477,17 @@ bool device_web_config_is_valid_video_source(uint32_t video_source)
     switch (video_source) {
         case DEVICE_WEB_CONFIG_VIDEO_SOURCE_MIPI:
         case DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool device_web_config_is_valid_wifi_mode(uint32_t wifi_mode)
+{
+    switch (wifi_mode) {
+        case DEVICE_WEB_CONFIG_WIFI_MODE_AP:
+        case DEVICE_WEB_CONFIG_WIFI_MODE_STA:
             return true;
         default:
             return false;
@@ -383,6 +570,18 @@ const char *device_web_config_get_video_source_name(uint32_t video_source)
     }
 }
 
+const char *device_web_config_get_wifi_mode_name(uint32_t wifi_mode)
+{
+    switch (wifi_mode) {
+        case DEVICE_WEB_CONFIG_WIFI_MODE_AP:
+            return "AP 热点模式";
+        case DEVICE_WEB_CONFIG_WIFI_MODE_STA:
+            return "STA 入网模式";
+        default:
+            return "unknown";
+    }
+}
+
 esp_err_t device_web_config_init(void)
 {
     esp_err_t ret = ESP_OK;
@@ -391,6 +590,7 @@ esp_err_t device_web_config_init(void)
     device_web_config_storage_t loaded_storage;
     device_web_config_storage_v1_t loaded_storage_v1;
     device_web_config_storage_v2_t loaded_storage_v2;
+    device_web_config_storage_v3_t loaded_storage_v3;
     device_web_config_t default_config;
     device_web_config_t imported_config;
 
@@ -422,6 +622,10 @@ esp_err_t device_web_config_init(void)
             if (blob_size == sizeof(loaded_storage)) {
                 ret = nvs_get_blob(nvs, DEVICE_WEB_CONFIG_NVS_KEY_CONFIG,
                                    &loaded_storage, &blob_size);
+            } else if (blob_size == sizeof(loaded_storage_v3)) {
+                memset(&loaded_storage_v3, 0, sizeof(loaded_storage_v3));
+                ret = nvs_get_blob(nvs, DEVICE_WEB_CONFIG_NVS_KEY_CONFIG,
+                                   &loaded_storage_v3, &blob_size);
             } else if (blob_size == sizeof(loaded_storage_v2)) {
                 memset(&loaded_storage_v2, 0, sizeof(loaded_storage_v2));
                 ret = nvs_get_blob(nvs, DEVICE_WEB_CONFIG_NVS_KEY_CONFIG,
@@ -438,8 +642,10 @@ esp_err_t device_web_config_init(void)
                 loaded_storage.version == DEVICE_WEB_CONFIG_VERSION &&
                 device_web_config_validate(&loaded_storage.config)) {
                 s_device_web_config_storage = loaded_storage;
-                ESP_LOGI(TAG, "已加载设备网页配置 | AP=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                ESP_LOGI(TAG, "已加载设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                         device_web_config_get_wifi_mode_name(loaded_storage.config.wifi_mode),
                          loaded_storage.config.wifi_ap_ssid,
+                         loaded_storage.config.wifi_sta_ssid,
                          device_web_config_get_video_source_name(loaded_storage.config.video_source),
                          device_web_config_get_video_profile_name(loaded_storage.config.video_profile),
                          loaded_storage.config.uart0_baud_rate,
@@ -447,11 +653,37 @@ esp_err_t device_web_config_init(void)
                 ret = ESP_OK;
             } else {
                 memset(&imported_config, 0, sizeof(imported_config));
-                if (blob_size == sizeof(loaded_storage_v2) &&
+                if (blob_size == sizeof(loaded_storage) &&
+                    device_web_config_import_v4(&loaded_storage, &imported_config)) {
+                    device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
+                    ESP_LOGI(TAG, "已迁移 V4 设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                             device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
+                             imported_config.wifi_ap_ssid,
+                             imported_config.wifi_sta_ssid,
+                             device_web_config_get_video_source_name(imported_config.video_source),
+                             device_web_config_get_video_profile_name(imported_config.video_profile),
+                             imported_config.uart0_baud_rate,
+                             imported_config.uart1_baud_rate);
+                    ret = ESP_OK;
+                } else if (blob_size == sizeof(loaded_storage_v3) &&
+                    device_web_config_import_v3(&loaded_storage_v3, &imported_config)) {
+                    device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
+                    ESP_LOGI(TAG, "已迁移 V3 设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                             device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
+                             imported_config.wifi_ap_ssid,
+                             imported_config.wifi_sta_ssid,
+                             device_web_config_get_video_source_name(imported_config.video_source),
+                             device_web_config_get_video_profile_name(imported_config.video_profile),
+                             imported_config.uart0_baud_rate,
+                             imported_config.uart1_baud_rate);
+                    ret = ESP_OK;
+                } else if (blob_size == sizeof(loaded_storage_v2) &&
                     device_web_config_import_v2(&loaded_storage_v2, &imported_config)) {
                     device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
-                    ESP_LOGI(TAG, "已迁移 V2 设备网页配置 | AP=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                    ESP_LOGI(TAG, "已迁移 V2 设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                             device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
                              imported_config.wifi_ap_ssid,
+                             imported_config.wifi_sta_ssid,
                              device_web_config_get_video_source_name(imported_config.video_source),
                              device_web_config_get_video_profile_name(imported_config.video_profile),
                              imported_config.uart0_baud_rate,
@@ -460,8 +692,10 @@ esp_err_t device_web_config_init(void)
                 } else if (blob_size == sizeof(loaded_storage_v1) &&
                     device_web_config_import_legacy(&loaded_storage_v1, &imported_config)) {
                     device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
-                    ESP_LOGI(TAG, "已迁移旧版设备网页配置 | AP=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                    ESP_LOGI(TAG, "已迁移旧版设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                             device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
                              imported_config.wifi_ap_ssid,
+                             imported_config.wifi_sta_ssid,
                              device_web_config_get_video_source_name(imported_config.video_source),
                              device_web_config_get_video_profile_name(imported_config.video_profile),
                              imported_config.uart0_baud_rate,
@@ -562,8 +796,10 @@ esp_err_t device_web_config_save(const device_web_config_t *config)
     }
 
     ESP_LOGI(TAG,
-             "设备网页配置已保存 | AP=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+             "设备网页配置已保存 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+             device_web_config_get_wifi_mode_name(config->wifi_mode),
              config->wifi_ap_ssid,
+             config->wifi_sta_ssid,
              device_web_config_get_video_source_name(config->video_source),
              device_web_config_get_video_profile_name(config->video_profile),
              config->uart0_baud_rate,

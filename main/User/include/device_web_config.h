@@ -6,7 +6,7 @@
  *   - UART0/UART1 波特率
  *   - 视频源选择
  *   - 视频分辨率档位
- *   - AP 热点名称、密码与网络地址
+ *   - Wi-Fi 网络场景、AP 参数与 STA 入网参数
  *
  * 这些配置默认在下次重启后生效，不影响 TF 卡中的已有媒体文件。
  */
@@ -38,18 +38,31 @@ typedef enum {
     DEVICE_WEB_CONFIG_VIDEO_PROFILE_800X640 = 4,
 } device_web_config_video_profile_t;
 
+typedef enum {
+    DEVICE_WEB_CONFIG_WIFI_MODE_AP = 0,
+    DEVICE_WEB_CONFIG_WIFI_MODE_STA = 1,
+} device_web_config_wifi_mode_t;
+
 typedef struct {
     uint32_t uart0_baud_rate;
     uint32_t uart1_baud_rate;
     uint32_t video_source;
     uint32_t video_profile;
+    uint32_t wifi_mode;
+    /* AP 模式参数：设备创建热点，外部客户端连接设备。 */
     char     wifi_ap_ssid[DEVICE_WEB_CONFIG_WIFI_SSID_LEN];
     char     wifi_ap_password[DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN];
-    /* 纯 AP 模式下使用的设备地址、网关与子网掩码。 */
     bool     wifi_use_static_ip;
     char     wifi_static_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
     char     wifi_static_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
     char     wifi_static_mask[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+    /* STA 模式参数：设备连接外部路由器或热点。 */
+    char     wifi_sta_ssid[DEVICE_WEB_CONFIG_WIFI_SSID_LEN];
+    char     wifi_sta_password[DEVICE_WEB_CONFIG_WIFI_PASSWORD_LEN];
+    bool     wifi_sta_use_static_ip;
+    char     wifi_sta_ip[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+    char     wifi_sta_gw[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
+    char     wifi_sta_mask[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN];
 } device_web_config_t;
 
 /**
@@ -99,6 +112,11 @@ bool device_web_config_is_valid_video_profile(uint32_t video_profile);
 bool device_web_config_is_valid_video_source(uint32_t video_source);
 
 /**
+ * @brief 判断 Wi-Fi 工作模式是否合法
+ */
+bool device_web_config_is_valid_wifi_mode(uint32_t wifi_mode);
+
+/**
  * @brief 判断波特率是否合法
  */
 bool device_web_config_is_valid_baud_rate(uint32_t baud_rate);
@@ -117,6 +135,11 @@ const char *device_web_config_get_video_profile_name(uint32_t video_profile);
  * @brief 获取视频源名称
  */
 const char *device_web_config_get_video_source_name(uint32_t video_source);
+
+/**
+ * @brief 获取 Wi-Fi 工作模式名称
+ */
+const char *device_web_config_get_wifi_mode_name(uint32_t wifi_mode);
 
 #ifdef __cplusplus
 }

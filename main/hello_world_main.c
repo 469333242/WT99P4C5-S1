@@ -3,8 +3,8 @@
  * @brief 应用程序主入口
  *
  * 负责系统初始化与各模块启动，具体实现位于 User/src 与 User/include 目录：
- *   - device_web_config: 网页设备配置读写（AP 热点、波特率、分辨率）
- *   - wifi_connect     : WiFi SoftAP 热点（通过 ESP32-C5 SDIO 协处理器）
+ *   - device_web_config: 网页设备配置读写（网络场景、波特率、分辨率）
+ *   - wifi_connect     : WiFi AP/STA 网络（通过 ESP32-C5 SDIO 协处理器）
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
@@ -45,7 +45,7 @@
 #define USE_ETHERNET    0   //切换网络连接方式：0=WiFi, 1=以太网
 #define ETH_ENABLE_TCP_SERVER   0   //网口 TCP 透传服务开关
 #define HOSTED_WIFI_READY_DELAY_MS 6000
-#define WIFI_AP_WAIT_SLICE_MS      15000
+#define WIFI_WAIT_SLICE_MS         15000
 #define WIFI_TIME_WAIT_MS          8000
 #define ETH_IP_WAIT_SLICE_MS       15000
 
@@ -62,7 +62,7 @@ static SemaphoreHandle_t s_hosted_up_sem;
 /**
  * @brief ESP-Hosted 事件回调
  *
- * SDIO 链路建立后释放信号量，通知 app_main 继续执行 WiFi AP 初始化。
+ * SDIO 链路建立后释放信号量，通知 app_main 继续执行 WiFi 初始化。
  */
 static void hosted_event_handler(void *arg, esp_event_base_t base,
                                   int32_t id, void *data)
@@ -73,9 +73,6 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
-
-
-
 /**
  * @brief 应用程序主入口
  *
@@ -84,7 +81,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   2. 设备网页配置初始化
  *   3. esp_netif + 事件循环
  *   4. ESP-Hosted → 等待与 C5 建立 SDIO 链路
- *   5. WiFi AP 启动
+ *   5. WiFi AP/STA 启动
  *   6. TF 卡初始化
  *   7. 媒体存储模块初始化
  *   8. RTSP 服务器启动
@@ -141,8 +138,9 @@ void app_main(void)
 #endif
 
 #else
-    /* 使用 WiFi SoftAP */
-    ESP_LOGI(TAG, "使用 WiFi SoftAP 模式");
+    /* 使用 WiFi，具体 AP/STA 场景由网页配置决定。 */
+    ESP_LOGI(TAG, "使用 WiFi 网络模式: %s",
+             device_web_config_get_wifi_mode_name(app_config.wifi_mode));
 
     /* 3. ESP-Hosted：建立与 C5 的 SDIO 链路 */
     s_hosted_up_sem = xSemaphoreCreateBinary();
@@ -155,24 +153,24 @@ void app_main(void)
     xSemaphoreTake(s_hosted_up_sem, portMAX_DELAY);
     ESP_LOGI(TAG, "SDIO 连接已建立");
 
-    /* 4. WiFi SoftAP 启动 */
+    /* 4. WiFi 网络启动 */
     /* SDIO TRANSPORT_UP 仅代表数据链路就绪，C5 WiFi 固件与射频初始化
      * 还需要额外时间。保留启动等待，避免过早创建 AP 时射频尚未就绪。 */
     vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
     err = wifi_connect_init();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi AP 初始化失败: 0x%x", err);
+        ESP_LOGE(TAG, "WiFi 初始化失败: 0x%x", err);
         return;
     }
 
-    ESP_LOGI(TAG, "等待 WiFi AP 启动...");
-    while ((err = wifi_connect_wait_for_ip(WIFI_AP_WAIT_SLICE_MS)) != ESP_OK) {
-        ESP_LOGW(TAG, "WiFi AP 尚未就绪，继续等待...");
+    ESP_LOGI(TAG, "等待 WiFi 网络就绪...");
+    while ((err = wifi_connect_wait_for_ip(WIFI_WAIT_SLICE_MS)) != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi 网络尚未就绪，继续等待...");
     }
-    ESP_LOGI(TAG, "WiFi AP 已就绪，开始启动各项服务");
+    ESP_LOGI(TAG, "WiFi 网络已就绪，开始启动各项服务");
     err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "系统时间尚未同步，请连接设备热点并打开媒体网页同步电脑时间");
+        ESP_LOGW(TAG, "系统时间尚未同步，请打开媒体网页同步电脑时间");
     }
 #endif
 

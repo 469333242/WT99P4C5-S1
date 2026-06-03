@@ -61,7 +61,7 @@ static const char *TAG = "photo_web";
 #define PHOTO_WEB_TIME_VALUE_LEN 24
 #define PHOTO_WEB_STATUS_QUERY_LEN 64
 #define PHOTO_WEB_DELETE_BODY_MAX_LEN 16384
-#define PHOTO_WEB_CONFIG_BODY_MAX_LEN 512
+#define PHOTO_WEB_CONFIG_BODY_MAX_LEN 1024
 #define PHOTO_WEB_THERMAL_BODY_MAX_LEN 64
 #define PHOTO_WEB_STATUS_TEXT_LEN 64
 #define PHOTO_WEB_VALID_UNIX_SEC 1704067200LL
@@ -599,12 +599,21 @@ static const char *s_photo_index_html_v6[] = {
     "        </div>\n",
     "        <div class='fieldRow'>\n",
     "          <div class='field'>\n",
+    "            <label for='wifiMode'>Wi-Fi 工作模式</label>\n",
+    "            <select id='wifiMode'>\n",
+    "              <option value='0'>AP 热点模式</option>\n",
+    "              <option value='1'>STA 入网模式</option>\n",
+    "            </select>\n",
+    "          </div>\n",
+    "          <div class='field'>\n",
     "            <label for='videoSource'>切换摄像头</label>\n",
     "            <select id='videoSource'>\n",
     "              <option value='1'>USB 热像仪</option>\n",
     "              <option value='0'>MIPI 摄像头</option>\n",
     "            </select>\n",
     "          </div>\n",
+    "        </div>\n",
+    "        <div class='fieldRow'>\n",
     "          <div class='field'>\n",
     "            <label id='videoProfileLabel' for='videoProfile'>MIPI 分辨率</label>\n",
     "            <select id='videoProfile'>\n",
@@ -621,6 +630,13 @@ static const char *s_photo_index_html_v6[] = {
     "              </select>\n",
     "              <button id='thermalEffectBtn' class='ghostBtn' type='button'>应用效果</button>\n",
     "            </div>\n",
+    "          </div>\n",
+    "          <div class='field'>\n",
+    "            <label for='wifiStaIpMode'>STA 地址方式</label>\n",
+    "            <select id='wifiStaIpMode'>\n",
+    "              <option value='0'>DHCP 自动获取</option>\n",
+    "              <option value='1'>固定 IP</option>\n",
+    "            </select>\n",
     "          </div>\n",
     "        </div>\n",
     "        <div class='fieldRow'>\n",
@@ -653,7 +669,7 @@ static const char *s_photo_index_html_v6[] = {
     "            </select>\n",
     "          </div>\n",
     "        </div>\n",
-    "        <div class='apInfo' aria-label='AP 连接信息'>\n",
+    "        <div id='apConfigBox' class='apInfo' aria-label='AP 连接信息'>\n",
     "          <div class='apInfoItem'><div class='field'><label for='wifiApSsid'>热点名称</label><input id='wifiApSsid' type='text' maxlength='31'></div></div>\n",
     "          <div class='apInfoItem'><div class='field'><label for='wifiApPassword'>热点密码</label><input id='wifiApPassword' type='text' maxlength='63'></div></div>\n",
     "          <div class='apInfoItem'><div class='field'><label for='wifiApIp'>设备地址</label><input id='wifiApIp' type='text' maxlength='15'></div></div>\n",
@@ -661,7 +677,15 @@ static const char *s_photo_index_html_v6[] = {
     "          <div class='apInfoItem'><div class='field'><label for='wifiApMask'>子网掩码</label><input id='wifiApMask' type='text' maxlength='15'></div></div>\n",
     "          <div class='apInfoItem'><div class='apInfoLabel'>最大客户端</div><div id='wifiApMaxClients' class='apInfoValue'>--</div></div>\n",
     "        </div>\n",
-    "        <div class='settingHint'>设备当前工作在纯 AP 模式；摄像头选择、热点名称、密码、AP 网络地址、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，成像效果可在 USB 热像仪工作时即时下发。</div>\n",
+    "        <div id='staConfigBox' class='apInfo hidden' aria-label='STA 入网信息'>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiStaSsid'>路由器 SSID</label><input id='wifiStaSsid' type='text' maxlength='31' placeholder='CEEWA'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiStaPassword'>路由器密码</label><input id='wifiStaPassword' type='text' maxlength='63' placeholder='52285509'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiStaIp'>STA 地址</label><input id='wifiStaIp' type='text' maxlength='15' placeholder='192.168.1.100'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiStaGateway'>网关</label><input id='wifiStaGateway' type='text' maxlength='15' placeholder='192.168.1.1'></div></div>\n",
+    "          <div class='apInfoItem'><div class='field'><label for='wifiStaMask'>子网掩码</label><input id='wifiStaMask' type='text' maxlength='15' placeholder='255.255.255.0'></div></div>\n",
+    "          <div class='apInfoItem'><div class='apInfoLabel'>工作方式</div><div class='apInfoValue'>连接外部路由器</div></div>\n",
+    "        </div>\n",
+    "        <div class='settingHint'>AP 与 STA 不会同时启用；网络场景、摄像头选择、热点或 STA 入网参数、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，成像效果可在 USB 热像仪工作时即时下发。</div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
     "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
@@ -714,6 +738,11 @@ static const char *s_photo_index_html_v6[] = {
     "    const CAPTURE_RETRY_DELAY_MS = 500;\n",
     "    const DEVICE_STATUS_REFRESH_MS = 15000;\n",
     "    const DEVICE_CLOCK_TICK_MS = 1000;\n",
+    "    const DEFAULT_STA_SSID = 'CEEWA';\n",
+    "    const DEFAULT_STA_PASSWORD = '52285509';\n",
+    "    const DEFAULT_STA_IP = '192.168.1.100';\n",
+    "    const DEFAULT_STA_GATEWAY = '192.168.1.1';\n",
+    "    const DEFAULT_STA_MASK = '255.255.255.0';\n",
     "    const state = {\n",
     "      busy: false,\n",
     "      deviceConfig: null,\n",
@@ -757,12 +786,21 @@ static const char *s_photo_index_html_v6[] = {
     "        thermalEffectBtn: document.getElementById('thermalEffectBtn'),\n",
     "        uart0Baud: document.getElementById('uart0Baud'),\n",
     "        uart1Baud: document.getElementById('uart1Baud'),\n",
+    "        wifiMode: document.getElementById('wifiMode'),\n",
+    "        wifiStaIpMode: document.getElementById('wifiStaIpMode'),\n",
+    "        apConfigBox: document.getElementById('apConfigBox'),\n",
+    "        staConfigBox: document.getElementById('staConfigBox'),\n",
     "        wifiApSsid: document.getElementById('wifiApSsid'),\n",
     "        wifiApPassword: document.getElementById('wifiApPassword'),\n",
     "        wifiApIp: document.getElementById('wifiApIp'),\n",
     "        wifiApGateway: document.getElementById('wifiApGateway'),\n",
     "        wifiApMask: document.getElementById('wifiApMask'),\n",
     "        wifiApMaxClients: document.getElementById('wifiApMaxClients'),\n",
+    "        wifiStaSsid: document.getElementById('wifiStaSsid'),\n",
+    "        wifiStaPassword: document.getElementById('wifiStaPassword'),\n",
+    "        wifiStaIp: document.getElementById('wifiStaIp'),\n",
+    "        wifiStaGateway: document.getElementById('wifiStaGateway'),\n",
+    "        wifiStaMask: document.getElementById('wifiStaMask'),\n",
     "        saveConfigBtn: document.getElementById('saveConfigBtn'),\n",
     "        factoryResetBtn: document.getElementById('factoryResetBtn')\n",
     "      },\n",
@@ -912,9 +950,10 @@ static const char *s_photo_index_html_v6[] = {
     "    function renderDeviceStatus() {\n",
     "      const info = state.deviceStatus || {};\n",
     "      const tfMounted = !!info.tf_mounted;\n",
+    "      const apMode = Number(info.wifi_mode_value) === 0;\n",
     "      updateDeviceClockBase(info);\n",
     "      renderDeviceClock();\n",
-    "      refs.device.apClients.textContent = String(Number(info.ap_connected_clients) || 0);\n",
+    "      refs.device.apClients.textContent = apMode ? String(Number(info.ap_connected_clients) || 0) : '--';\n",
     "      refs.device.rtspUrl.textContent = info.rtsp_url || '--';\n",
     "      refs.device.tcpUart0Url.textContent = info.tcp_uart0_url || '--';\n",
     "      refs.device.videoSourceStatus.textContent = info.video_source_name || '--';\n",
@@ -937,21 +976,32 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.thermalEffect.value = String(config.thermal_effect || 0);\n",
     "      refs.device.uart0Baud.value = String(config.uart0_baud_rate || '115200');\n",
     "      refs.device.uart1Baud.value = String(config.uart1_baud_rate || '115200');\n",
+    "      refs.device.wifiMode.value = String(Number(config.wifi_mode_value) === 1 ? 1 : 0);\n",
+    "      refs.device.wifiStaIpMode.value = config.wifi_sta_use_static_ip ? '1' : '0';\n",
     "      refs.device.wifiApSsid.value = config.wifi_ap_ssid || '';\n",
     "      refs.device.wifiApPassword.value = config.wifi_ap_password || '';\n",
     "      refs.device.wifiApIp.value = config.wifi_ap_ip || '';\n",
     "      refs.device.wifiApGateway.value = config.wifi_ap_gateway || '';\n",
     "      refs.device.wifiApMask.value = config.wifi_ap_mask || '';\n",
     "      refs.device.wifiApMaxClients.textContent = String(Number(config.wifi_ap_max_connections) || 0);\n",
+    "      refs.device.wifiStaSsid.value = config.wifi_sta_ssid || DEFAULT_STA_SSID;\n",
+    "      refs.device.wifiStaPassword.value = config.wifi_sta_ssid ? (config.wifi_sta_password || '') : DEFAULT_STA_PASSWORD;\n",
+    "      refs.device.wifiStaIp.value = config.wifi_sta_ip || DEFAULT_STA_IP;\n",
+    "      refs.device.wifiStaGateway.value = config.wifi_sta_gateway || DEFAULT_STA_GATEWAY;\n",
+    "      refs.device.wifiStaMask.value = config.wifi_sta_mask || DEFAULT_STA_MASK;\n",
     "      updateActionStates();\n",
     "    }\n",
     "    function updateDeviceActions() {\n",
     "      const videoSource = refs.device.videoSource.value;\n",
     "      const thermalSelected = videoSource !== '0';\n",
+    "      const staMode = refs.device.wifiMode.value === '1';\n",
+    "      const staStaticIp = refs.device.wifiStaIpMode.value === '1';\n",
     "      refs.device.videoProfileLabel.textContent = thermalSelected ? '热成像效果' : 'MIPI 分辨率';\n",
     "      refs.device.videoProfileLabel.setAttribute('for', thermalSelected ? 'thermalEffect' : 'videoProfile');\n",
     "      refs.device.videoProfile.classList.toggle('hidden', thermalSelected);\n",
     "      refs.device.thermalEffectBox.classList.toggle('hidden', !thermalSelected);\n",
+    "      refs.device.apConfigBox.classList.toggle('hidden', staMode);\n",
+    "      refs.device.staConfigBox.classList.toggle('hidden', !staMode);\n",
     "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
     "      refs.device.syncTimeBtn.disabled = state.busy;\n",
     "      refs.device.rebootBtn.disabled = state.busy;\n",
@@ -961,11 +1011,18 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.thermalEffectBtn.disabled = state.busy || !thermalSelected;\n",
     "      refs.device.uart0Baud.disabled = state.busy;\n",
     "      refs.device.uart1Baud.disabled = state.busy;\n",
-    "      refs.device.wifiApSsid.disabled = state.busy;\n",
-    "      refs.device.wifiApPassword.disabled = state.busy;\n",
-    "      refs.device.wifiApIp.disabled = state.busy;\n",
-    "      refs.device.wifiApGateway.disabled = state.busy;\n",
-    "      refs.device.wifiApMask.disabled = state.busy;\n",
+    "      refs.device.wifiMode.disabled = state.busy;\n",
+    "      refs.device.wifiStaIpMode.disabled = state.busy || !staMode;\n",
+    "      refs.device.wifiApSsid.disabled = state.busy || staMode;\n",
+    "      refs.device.wifiApPassword.disabled = state.busy || staMode;\n",
+    "      refs.device.wifiApIp.disabled = state.busy || staMode;\n",
+    "      refs.device.wifiApGateway.disabled = state.busy || staMode;\n",
+    "      refs.device.wifiApMask.disabled = state.busy || staMode;\n",
+    "      refs.device.wifiStaSsid.disabled = state.busy || !staMode;\n",
+    "      refs.device.wifiStaPassword.disabled = state.busy || !staMode;\n",
+    "      refs.device.wifiStaIp.disabled = state.busy || !staMode || !staStaticIp;\n",
+    "      refs.device.wifiStaGateway.disabled = state.busy || !staMode || !staStaticIp;\n",
+    "      refs.device.wifiStaMask.disabled = state.busy || !staMode || !staStaticIp;\n",
     "      refs.device.saveConfigBtn.disabled = state.busy;\n",
     "      refs.device.factoryResetBtn.disabled = state.busy;\n",
     "    }\n",
@@ -1199,11 +1256,18 @@ static const char *s_photo_index_html_v6[] = {
     "      params.set('video_profile', refs.device.videoProfile.value);\n",
     "      params.set('uart0_baud_rate', refs.device.uart0Baud.value);\n",
     "      params.set('uart1_baud_rate', refs.device.uart1Baud.value);\n",
+    "      params.set('wifi_mode', refs.device.wifiMode.value);\n",
     "      params.set('wifi_ap_ssid', refs.device.wifiApSsid.value.trim());\n",
     "      params.set('wifi_ap_password', refs.device.wifiApPassword.value);\n",
     "      params.set('wifi_ap_ip', refs.device.wifiApIp.value.trim());\n",
     "      params.set('wifi_ap_gateway', refs.device.wifiApGateway.value.trim());\n",
     "      params.set('wifi_ap_mask', refs.device.wifiApMask.value.trim());\n",
+    "      params.set('wifi_sta_ssid', refs.device.wifiStaSsid.value.trim());\n",
+    "      params.set('wifi_sta_password', refs.device.wifiStaPassword.value);\n",
+    "      params.set('wifi_sta_use_static_ip', refs.device.wifiStaIpMode.value);\n",
+    "      params.set('wifi_sta_ip', refs.device.wifiStaIp.value.trim());\n",
+    "      params.set('wifi_sta_gateway', refs.device.wifiStaGateway.value.trim());\n",
+    "      params.set('wifi_sta_mask', refs.device.wifiStaMask.value.trim());\n",
     "      return fetchJson('/api/config', {\n",
     "        method: 'POST',\n",
     "        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },\n",
@@ -1545,6 +1609,8 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
     "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
     "    refs.device.videoSource.addEventListener('change', updateActionStates);\n",
+    "    refs.device.wifiMode.addEventListener('change', updateActionStates);\n",
+    "    refs.device.wifiStaIpMode.addEventListener('change', updateActionStates);\n",
     "    refs.device.thermalEffectBtn.addEventListener('click', applyThermalEffect);\n",
     "    refs.photo.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('photo'));\n",
     "    refs.photo.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('photo'));\n",
@@ -2026,6 +2092,11 @@ static esp_netif_t *photo_web_get_active_netif(void)
         return netif;
     }
 
+    netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif) {
+        return netif;
+    }
+
     return esp_netif_get_handle_from_ifkey("ETH_DEF");
 }
 
@@ -2447,7 +2518,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     char time_text[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
     char query[PHOTO_WEB_STATUS_QUERY_LEN] = {0};
     char bool_text[8] = {0};
-    char resp[3072] = {0};
+    char resp[4096] = {0};
     device_web_config_t config = {0};
     media_storage_tf_status_t tf_status = {0};
     int resp_len;
@@ -2495,9 +2566,12 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
     resp_len = snprintf(resp, sizeof(resp),
                         "{\"current_time\":\"%s\",\"current_unix_ms\":%" PRId64
                         ",\"time_valid\":%s,\"current_ip\":\"%s\",\"current_gw\":\"%s\""
-                        ",\"current_mask\":\"%s\",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
+                        ",\"current_mask\":\"%s\",\"wifi_mode\":\"%s\",\"wifi_mode_value\":%" PRIu32
+                        ",\"wifi_mode_name\":\"%s\",\"wifi_ap_ssid\":\"%s\""
                         ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
-                        ",\"wifi_ap_ip\":\"%s\",\"wifi_ap_max_connections\":%d"
+                        ",\"wifi_ap_ip\":\"%s\",\"wifi_sta_ssid\":\"%s\""
+                        ",\"wifi_sta_use_static_ip\":%s,\"wifi_sta_ip\":\"%s\""
+                        ",\"wifi_ap_max_connections\":%d"
                         ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\",\"tcp_uart0_url\":\"%s\""
                         ",\"tcp_uart1_url\":\"%s\",\"ap_connected_clients\":%" PRIu32
                         ",\"tf_mounted\":%s,\"tf_card_ok\":%s,\"tf_full\":%s"
@@ -2511,10 +2585,17 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         ",\"tf_speed_text\":\"%s\",\"active_clients\":%" PRIu32 "}",
                         time_text, unix_ms, time_valid ? "true" : "false",
                         ip_text, gw_text, mask_text,
+                        config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA ? "STA" : "AP",
+                        config.wifi_mode,
+                        device_web_config_get_wifi_mode_name(config.wifi_mode),
                         config.wifi_ap_ssid,
                         config.video_source,
                         device_web_config_get_video_source_name(config.video_source),
-                        config.wifi_static_ip, WIFI_AP_MAX_CONNECTIONS,
+                        config.wifi_static_ip,
+                        config.wifi_sta_ssid,
+                        config.wifi_sta_use_static_ip ? "true" : "false",
+                        config.wifi_sta_ip,
+                        WIFI_AP_MAX_CONNECTIONS,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url,
                         ap_connected_clients,
                         tf_status.tf_mounted ? "true" : "false",
@@ -2547,7 +2628,14 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 {
     device_web_config_t config = {0};
     usb_thermal_camera_effect_t thermal_effect;
-    char resp[1024] = {0};
+    char ip_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char gw_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char mask_text[DEVICE_WEB_CONFIG_IPV4_TEXT_LEN] = {0};
+    char rtsp_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
+    char web_url[PHOTO_WEB_MAX_PATH_LEN] = {0};
+    char tcp_uart0_url[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
+    char tcp_uart1_url[PHOTO_WEB_STATUS_TEXT_LEN] = {0};
+    char resp[4096] = {0};
     int resp_len;
 
     if (!req) {
@@ -2556,6 +2644,13 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 
     device_web_config_get(&config);
     thermal_effect = usb_thermal_camera_get_effect();
+    photo_web_fill_ip_texts(ip_text, sizeof(ip_text),
+                            gw_text, sizeof(gw_text),
+                            mask_text, sizeof(mask_text),
+                            rtsp_url, sizeof(rtsp_url),
+                            web_url, sizeof(web_url),
+                            tcp_uart0_url, sizeof(tcp_uart0_url),
+                            tcp_uart1_url, sizeof(tcp_uart1_url));
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
@@ -2565,12 +2660,17 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
                         ",\"video_profile\":%" PRIu32 ",\"video_profile_name\":\"%s\""
                         ",\"thermal_effect\":%" PRIu32 ",\"thermal_effect_name\":\"%s\""
-                        ",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
+                        ",\"wifi_mode\":\"%s\",\"wifi_mode_value\":%" PRIu32
+                        ",\"wifi_mode_name\":\"%s\",\"wifi_ap_ssid\":\"%s\""
                         ",\"wifi_ap_password\":\"%s\",\"wifi_ap_ip\":\"%s\""
                         ",\"wifi_ap_gateway\":\"%s\",\"wifi_ap_mask\":\"%s\""
+                        ",\"wifi_sta_ssid\":\"%s\",\"wifi_sta_password\":\"%s\""
+                        ",\"wifi_sta_use_static_ip\":%s,\"wifi_sta_ip\":\"%s\""
+                        ",\"wifi_sta_gateway\":\"%s\",\"wifi_sta_mask\":\"%s\""
                         ",\"wifi_ap_max_connections\":%d"
-                        ",\"web_url\":\"http://%s/\",\"rtsp_url\":\"rtsp://%s:%d/stream\""
-                        ",\"tcp_uart0_url\":\"%s:%d\",\"tcp_uart1_url\":\"%s:%d\"}",
+                        ",\"current_ip\":\"%s\",\"current_gw\":\"%s\",\"current_mask\":\"%s\""
+                        ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\""
+                        ",\"tcp_uart0_url\":\"%s\",\"tcp_uart1_url\":\"%s\"}",
                         config.uart0_baud_rate, config.uart1_baud_rate,
                         config.video_source,
                         device_web_config_get_video_source_name(config.video_source),
@@ -2578,11 +2678,17 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         device_web_config_get_video_profile_name(config.video_profile),
                         (uint32_t)thermal_effect,
                         usb_thermal_camera_get_effect_name(thermal_effect),
+                        config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA ? "STA" : "AP",
+                        config.wifi_mode,
+                        device_web_config_get_wifi_mode_name(config.wifi_mode),
                         config.wifi_ap_ssid, config.wifi_ap_password,
                         config.wifi_static_ip, config.wifi_static_gw, config.wifi_static_mask,
+                        config.wifi_sta_ssid, config.wifi_sta_password,
+                        config.wifi_sta_use_static_ip ? "true" : "false",
+                        config.wifi_sta_ip, config.wifi_sta_gw, config.wifi_sta_mask,
                         WIFI_AP_MAX_CONNECTIONS,
-                        config.wifi_static_ip, config.wifi_static_ip, RTSP_PORT,
-                        config.wifi_static_ip, TCP_UART0_PORT, config.wifi_static_ip, TCP_UART1_PORT);
+                        ip_text, gw_text, mask_text,
+                        web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url);
     if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -2594,6 +2700,7 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
 {
     char *body = NULL;
     device_web_config_t config = {0};
+    uint32_t sta_use_static_ip = 0;
     esp_err_t ret;
 
     if (!req) {
@@ -2629,6 +2736,9 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
         ret = photo_web_form_get_u32(body, "uart1_baud_rate", &config.uart1_baud_rate);
     }
     if (ret == ESP_OK) {
+        ret = photo_web_form_get_u32(body, "wifi_mode", &config.wifi_mode);
+    }
+    if (ret == ESP_OK) {
         ret = photo_web_form_get_text(body, "wifi_ap_ssid",
                                       config.wifi_ap_ssid, sizeof(config.wifi_ap_ssid));
     }
@@ -2648,6 +2758,30 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
     if (ret == ESP_OK) {
         ret = photo_web_form_get_text(body, "wifi_ap_mask",
                                       config.wifi_static_mask, sizeof(config.wifi_static_mask));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_sta_ssid",
+                                      config.wifi_sta_ssid, sizeof(config.wifi_sta_ssid));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_sta_password",
+                                      config.wifi_sta_password, sizeof(config.wifi_sta_password));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_u32(body, "wifi_sta_use_static_ip", &sta_use_static_ip);
+        config.wifi_sta_use_static_ip = (sta_use_static_ip != 0U);
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_sta_ip",
+                                      config.wifi_sta_ip, sizeof(config.wifi_sta_ip));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_sta_gateway",
+                                      config.wifi_sta_gw, sizeof(config.wifi_sta_gw));
+    }
+    if (ret == ESP_OK) {
+        ret = photo_web_form_get_text(body, "wifi_sta_mask",
+                                      config.wifi_sta_mask, sizeof(config.wifi_sta_mask));
     }
 
     free(body);
