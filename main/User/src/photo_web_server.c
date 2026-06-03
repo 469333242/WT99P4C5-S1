@@ -45,6 +45,7 @@
 #include "rtsp_server.h"
 #include "tcp_uart_server.h"
 #include "tf_card.h"
+#include "usb_thermal_camera.h"
 #include "wifi_connect.h"
 
 static const char *TAG = "photo_web";
@@ -61,6 +62,7 @@ static const char *TAG = "photo_web";
 #define PHOTO_WEB_STATUS_QUERY_LEN 64
 #define PHOTO_WEB_DELETE_BODY_MAX_LEN 16384
 #define PHOTO_WEB_CONFIG_BODY_MAX_LEN 512
+#define PHOTO_WEB_THERMAL_BODY_MAX_LEN 64
 #define PHOTO_WEB_STATUS_TEXT_LEN 64
 #define PHOTO_WEB_VALID_UNIX_SEC 1704067200LL
 #define PHOTO_WEB_SERVER_STACK_SIZE (8 * 1024)
@@ -113,6 +115,7 @@ static const char *s_photo_index_html_v6[] = {
     "      background: radial-gradient(circle at top, #fff8ef 0, #f4efe7 42%, #ece2d6 100%);\n",
     "    }\n",
     "    a { color: inherit; }\n",
+    "    .hidden { display: none !important; }\n",
     "    .shell {\n",
     "      max-width: 1260px;\n",
     "      margin: 0 auto;\n",
@@ -244,6 +247,16 @@ static const char *s_photo_index_html_v6[] = {
     "    .field select:disabled {\n",
     "      background: #efe7dd;\n",
     "      color: #8f7f70;\n",
+    "    }\n",
+    "    .fieldActionRow {\n",
+    "      display: grid;\n",
+    "      grid-template-columns: minmax(0, 1fr) auto;\n",
+    "      gap: 8px;\n",
+    "      align-items: center;\n",
+    "    }\n",
+    "    .fieldActionRow button {\n",
+    "      min-width: 92px;\n",
+    "      padding: 11px 14px;\n",
     "    }\n",
     "    .fieldRow {\n",
     "      display: grid;\n",
@@ -517,6 +530,7 @@ static const char *s_photo_index_html_v6[] = {
     "    }\n",
     "    @media (max-width: 480px) {\n",
     "      .fieldRow { grid-template-columns: 1fr; }\n",
+    "      .fieldActionRow { grid-template-columns: 1fr; }\n",
     "      .grid { grid-template-columns: 1fr; }\n",
     "      .toolbar,\n",
     "      .sectionTools,\n",
@@ -592,13 +606,21 @@ static const char *s_photo_index_html_v6[] = {
     "            </select>\n",
     "          </div>\n",
     "          <div class='field'>\n",
-    "            <label for='videoProfile'>MIPI 分辨率</label>\n",
+    "            <label id='videoProfileLabel' for='videoProfile'>MIPI 分辨率</label>\n",
     "            <select id='videoProfile'>\n",
     "              <option value='1'>1280 x 960</option>\n",
     "              <option value='2'>1920 x 1080</option>\n",
     "              <option value='3'>800 x 800</option>\n",
     "              <option value='4'>800 x 640</option>\n",
     "            </select>\n",
+    "            <div id='thermalEffectBox' class='fieldActionRow hidden'>\n",
+    "              <select id='thermalEffect'>\n",
+    "                <option value='0'>白热</option>\n",
+    "                <option value='1'>黑热</option>\n",
+    "                <option value='2'>铁红</option>\n",
+    "              </select>\n",
+    "              <button id='thermalEffectBtn' class='ghostBtn' type='button'>应用效果</button>\n",
+    "            </div>\n",
     "          </div>\n",
     "        </div>\n",
     "        <div class='fieldRow'>\n",
@@ -639,7 +661,7 @@ static const char *s_photo_index_html_v6[] = {
     "          <div class='apInfoItem'><div class='field'><label for='wifiApMask'>子网掩码</label><input id='wifiApMask' type='text' maxlength='15'></div></div>\n",
     "          <div class='apInfoItem'><div class='apInfoLabel'>最大客户端</div><div id='wifiApMaxClients' class='apInfoValue'>--</div></div>\n",
     "        </div>\n",
-    "        <div class='settingHint'>设备当前工作在纯 AP 模式；摄像头选择、热点名称、密码、AP 网络地址、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，MIPI 分辨率只对 MIPI 摄像头生效。</div>\n",
+    "        <div class='settingHint'>设备当前工作在纯 AP 模式；摄像头选择、热点名称、密码、AP 网络地址、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，成像效果可在 USB 热像仪工作时即时下发。</div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
     "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
@@ -728,7 +750,11 @@ static const char *s_photo_index_html_v6[] = {
     "        syncTimeBtn: document.getElementById('syncTimeBtn'),\n",
     "        rebootBtn: document.getElementById('rebootBtn'),\n",
     "        videoSource: document.getElementById('videoSource'),\n",
+    "        videoProfileLabel: document.getElementById('videoProfileLabel'),\n",
     "        videoProfile: document.getElementById('videoProfile'),\n",
+    "        thermalEffectBox: document.getElementById('thermalEffectBox'),\n",
+    "        thermalEffect: document.getElementById('thermalEffect'),\n",
+    "        thermalEffectBtn: document.getElementById('thermalEffectBtn'),\n",
     "        uart0Baud: document.getElementById('uart0Baud'),\n",
     "        uart1Baud: document.getElementById('uart1Baud'),\n",
     "        wifiApSsid: document.getElementById('wifiApSsid'),\n",
@@ -908,6 +934,7 @@ static const char *s_photo_index_html_v6[] = {
     "      }\n",
     "      refs.device.videoSource.value = String(config.video_source === 0 ? 0 : (config.video_source || 1));\n",
     "      refs.device.videoProfile.value = String(config.video_profile || '1');\n",
+    "      refs.device.thermalEffect.value = String(config.thermal_effect || 0);\n",
     "      refs.device.uart0Baud.value = String(config.uart0_baud_rate || '115200');\n",
     "      refs.device.uart1Baud.value = String(config.uart1_baud_rate || '115200');\n",
     "      refs.device.wifiApSsid.value = config.wifi_ap_ssid || '';\n",
@@ -920,11 +947,18 @@ static const char *s_photo_index_html_v6[] = {
     "    }\n",
     "    function updateDeviceActions() {\n",
     "      const videoSource = refs.device.videoSource.value;\n",
+    "      const thermalSelected = videoSource !== '0';\n",
+    "      refs.device.videoProfileLabel.textContent = thermalSelected ? '热成像效果' : 'MIPI 分辨率';\n",
+    "      refs.device.videoProfileLabel.setAttribute('for', thermalSelected ? 'thermalEffect' : 'videoProfile');\n",
+    "      refs.device.videoProfile.classList.toggle('hidden', thermalSelected);\n",
+    "      refs.device.thermalEffectBox.classList.toggle('hidden', !thermalSelected);\n",
     "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
     "      refs.device.syncTimeBtn.disabled = state.busy;\n",
     "      refs.device.rebootBtn.disabled = state.busy;\n",
     "      refs.device.videoSource.disabled = state.busy;\n",
-    "      refs.device.videoProfile.disabled = state.busy || videoSource !== '0';\n",
+    "      refs.device.videoProfile.disabled = state.busy || thermalSelected;\n",
+    "      refs.device.thermalEffect.disabled = state.busy || !thermalSelected;\n",
+    "      refs.device.thermalEffectBtn.disabled = state.busy || !thermalSelected;\n",
     "      refs.device.uart0Baud.disabled = state.busy;\n",
     "      refs.device.uart1Baud.disabled = state.busy;\n",
     "      refs.device.wifiApSsid.disabled = state.busy;\n",
@@ -1176,6 +1210,15 @@ static const char *s_photo_index_html_v6[] = {
     "        body: params.toString()\n",
     "      });\n",
     "    }\n",
+    "    async function requestThermalEffect() {\n",
+    "      const params = new URLSearchParams();\n",
+    "      params.set('effect', refs.device.thermalEffect.value);\n",
+    "      return fetchJson('/api/thermal_effect', {\n",
+    "        method: 'POST',\n",
+    "        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },\n",
+    "        body: params.toString()\n",
+    "      });\n",
+    "    }\n",
     "    async function requestFactoryReset() {\n",
     "      return fetchJson('/api/factory_reset', { method: 'POST' });\n",
     "    }\n",
@@ -1316,6 +1359,25 @@ static const char *s_photo_index_html_v6[] = {
     "        setStatus('配置已保存，请重启设备使新配置生效', false);\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '保存设备配置失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function applyThermalEffect() {\n",
+    "      if (state.busy || refs.device.videoSource.value === '0') {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在设置热像仪成像效果...', false);\n",
+    "      try {\n",
+    "        const result = await requestThermalEffect();\n",
+    "        if (state.deviceConfig) {\n",
+    "          state.deviceConfig.thermal_effect = Number(result.thermal_effect) || 0;\n",
+    "        }\n",
+    "        renderDeviceConfig();\n",
+    "        setStatus('热像仪成像效果已设置为' + (result.thermal_effect_name || refs.device.thermalEffect.options[refs.device.thermalEffect.selectedIndex].text), false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '设置热像仪成像效果失败', true);\n",
     "      } finally {\n",
     "        setBusy(false);\n",
     "      }\n",
@@ -1483,6 +1545,7 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
     "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
     "    refs.device.videoSource.addEventListener('change', updateActionStates);\n",
+    "    refs.device.thermalEffectBtn.addEventListener('click', applyThermalEffect);\n",
     "    refs.photo.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('photo'));\n",
     "    refs.photo.toggleAllBtn.addEventListener('click', () => toggleSectionSelection('photo'));\n",
     "    refs.video.selectAllBtn.addEventListener('click', () => toggleSectionSelectAll('video'));\n",
@@ -2483,7 +2546,8 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
 static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
 {
     device_web_config_t config = {0};
-    char resp[896] = {0};
+    usb_thermal_camera_effect_t thermal_effect;
+    char resp[1024] = {0};
     int resp_len;
 
     if (!req) {
@@ -2491,6 +2555,7 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
     }
 
     device_web_config_get(&config);
+    thermal_effect = usb_thermal_camera_get_effect();
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
@@ -2499,6 +2564,7 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         "{\"uart0_baud_rate\":%" PRIu32 ",\"uart1_baud_rate\":%" PRIu32
                         ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
                         ",\"video_profile\":%" PRIu32 ",\"video_profile_name\":\"%s\""
+                        ",\"thermal_effect\":%" PRIu32 ",\"thermal_effect_name\":\"%s\""
                         ",\"wifi_mode\":\"AP\",\"wifi_ap_ssid\":\"%s\""
                         ",\"wifi_ap_password\":\"%s\",\"wifi_ap_ip\":\"%s\""
                         ",\"wifi_ap_gateway\":\"%s\",\"wifi_ap_mask\":\"%s\""
@@ -2510,6 +2576,8 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         device_web_config_get_video_source_name(config.video_source),
                         config.video_profile,
                         device_web_config_get_video_profile_name(config.video_profile),
+                        (uint32_t)thermal_effect,
+                        usb_thermal_camera_get_effect_name(thermal_effect),
                         config.wifi_ap_ssid, config.wifi_ap_password,
                         config.wifi_static_ip, config.wifi_static_gw, config.wifi_static_mask,
                         WIFI_AP_MAX_CONNECTIONS,
@@ -2600,6 +2668,90 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
     return httpd_resp_sendstr(req, "{\"ok\":true,\"reboot_required\":true}");
+}
+
+static esp_err_t photo_web_api_thermal_effect_handler(httpd_req_t *req)
+{
+    char *body = NULL;
+    uint32_t effect_value = 0;
+    device_web_config_t config = {0};
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "收到网页热像仪成像效果设置请求 | 长度=%d", (int)req->content_len);
+
+    if (req->content_len > PHOTO_WEB_THERMAL_BODY_MAX_LEN) {
+        ESP_LOGW(TAG, "网页热像仪成像效果请求过大 | 长度=%d", (int)req->content_len);
+        return photo_web_send_json_error(req, "413 Payload Too Large", "热像仪效果请求过大");
+    }
+
+    ret = photo_web_read_request_body(req, &body);
+    if (ret == ESP_ERR_INVALID_ARG) {
+        ESP_LOGW(TAG, "网页热像仪成像效果请求为空");
+        return photo_web_send_json_error(req, "400 Bad Request", "热像仪效果请求为空");
+    }
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        ESP_LOGW(TAG, "读取网页热像仪成像效果请求失败，请求过大");
+        return photo_web_send_json_error(req, "413 Payload Too Large", "热像仪效果请求过大");
+    }
+    if (ret == ESP_ERR_NO_MEM) {
+        ESP_LOGW(TAG, "读取网页热像仪成像效果请求失败，内存不足");
+        return photo_web_send_json_error(req, "500 Internal Server Error", "内存不足");
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取网页热像仪成像效果请求失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "400 Bad Request", "热像仪效果请求读取失败");
+    }
+
+    ret = photo_web_form_get_u32(body, "effect", &effect_value);
+    free(body);
+    if (ret != ESP_OK || effect_value > (uint32_t)USB_THERMAL_CAMERA_EFFECT_IRON_RED) {
+        ESP_LOGW(TAG, "网页热像仪成像效果参数错误 | value=%" PRIu32, effect_value);
+        return photo_web_send_json_error(req, "400 Bad Request", "热像仪效果参数错误");
+    }
+
+    ESP_LOGI(TAG, "网页请求设置热像仪成像效果: %s",
+             usb_thermal_camera_get_effect_name((usb_thermal_camera_effect_t)effect_value));
+
+    device_web_config_get(&config);
+    if (config.video_source != DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL) {
+        ESP_LOGW(TAG, "网页请求设置热像仪成像效果被拒绝，当前视频源=%s",
+                 device_web_config_get_video_source_name(config.video_source));
+        return photo_web_send_json_error(req, "409 Conflict", "当前未选择 USB 热像仪");
+    }
+
+    ret = usb_thermal_camera_set_effect((usb_thermal_camera_effect_t)effect_value);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "网页设置热像仪成像效果失败，USB 热像仪未连接或未就绪");
+        return photo_web_send_json_error(req, "409 Conflict", "USB 热像仪未连接或未就绪");
+    }
+    if (ret == ESP_ERR_INVALID_ARG) {
+        ESP_LOGW(TAG, "网页设置热像仪成像效果失败，参数非法");
+        return photo_web_send_json_error(req, "400 Bad Request", "热像仪效果参数非法");
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "网页设置热像仪成像效果失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "设置热像仪成像效果失败");
+    }
+
+    char resp[128];
+    int resp_len = snprintf(resp, sizeof(resp),
+                            "{\"ok\":true,\"thermal_effect\":%" PRIu32
+                            ",\"thermal_effect_name\":\"%s\"}",
+                            effect_value,
+                            usb_thermal_camera_get_effect_name((usb_thermal_camera_effect_t)effect_value));
+    if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    ESP_LOGI(TAG, "网页热像仪成像效果设置完成: %s",
+             usb_thermal_camera_get_effect_name((usb_thermal_camera_effect_t)effect_value));
+    return httpd_resp_send(req, resp, resp_len);
 }
 
 static esp_err_t photo_web_api_time_handler(httpd_req_t *req)
@@ -3278,7 +3430,7 @@ esp_err_t photo_web_server_start(void)
     config.server_port = PHOTO_WEB_SERVER_PORT;
     config.stack_size = PHOTO_WEB_SERVER_STACK_SIZE;
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 18;
     config.backlog_conn = 4;
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -3330,6 +3482,12 @@ esp_err_t photo_web_server_start(void)
         .uri = "/api/time",
         .method = HTTP_GET,
         .handler = photo_web_api_time_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_thermal_effect_uri = {
+        .uri = "/api/thermal_effect",
+        .method = HTTP_POST,
+        .handler = photo_web_api_thermal_effect_handler,
         .user_ctx = NULL,
     };
     const httpd_uri_t api_capture_uri = {
@@ -3405,6 +3563,10 @@ esp_err_t photo_web_server_start(void)
     if (ret == ESP_OK)
     {
         ret = httpd_register_uri_handler(s_photo_web.server, &api_time_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_thermal_effect_uri);
     }
     if (ret == ESP_OK)
     {
