@@ -95,6 +95,29 @@ void device_web_config_get(device_web_config_t *out_config);
 esp_err_t device_web_config_save(const device_web_config_t *config);
 
 /**
+ * @brief 保存设备网页配置，并标记 STA 模式需要网页确认
+ *
+ * 当网页切换到 STA 模式时使用该接口保存配置。设备下次以 STA 启动后，
+ * 如果用户没有在网页中确认可访问，会自动回退到 AP 模式。
+ */
+esp_err_t device_web_config_save_sta_pending_confirm(const device_web_config_t *config);
+
+/**
+ * @brief 判断当前 STA 模式是否处于待确认状态
+ */
+bool device_web_config_is_sta_pending_confirm(void);
+
+/**
+ * @brief 清除 STA 待确认状态
+ */
+esp_err_t device_web_config_clear_sta_pending_confirm(void);
+
+/**
+ * @brief 将网络模式回退到 AP，并清除 STA 待确认状态
+ */
+esp_err_t device_web_config_fallback_to_ap(void);
+
+/**
  * @brief 恢复设备网页配置默认值
  *
  * 仅重置网页可配置参数，不删除 TF 卡中的媒体文件。

@@ -20,13 +20,15 @@ static const char *TAG = "device_web_cfg";
 #define DEVICE_WEB_CONFIG_NVS_NAMESPACE    "device_web_cfg"
 #define DEVICE_WEB_CONFIG_NVS_KEY_CONFIG   "config"
 #define DEVICE_WEB_CONFIG_MAGIC            0x44574346U
-#define DEVICE_WEB_CONFIG_VERSION          5U
+#define DEVICE_WEB_CONFIG_VERSION          6U
 #define DEVICE_WEB_CONFIG_VERSION_LEGACY   1U
 #define DEVICE_WEB_CONFIG_VERSION_V2       2U
 #define DEVICE_WEB_CONFIG_VERSION_V3       3U
 #define DEVICE_WEB_CONFIG_VERSION_V4       4U
+#define DEVICE_WEB_CONFIG_VERSION_V5       5U
 #define DEVICE_WEB_CONFIG_MIN_BAUD_RATE    1200U
 #define DEVICE_WEB_CONFIG_MAX_BAUD_RATE    2000000U
+#define DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM  (1U << 0)
 
 typedef struct {
     uint32_t uart0_baud_rate;
@@ -341,6 +343,23 @@ static bool device_web_config_import_v4(const device_web_config_storage_t *legac
     return device_web_config_validate(out_config);
 }
 
+static bool device_web_config_import_v5(const device_web_config_storage_t *legacy,
+                                        device_web_config_t *out_config,
+                                        uint32_t *out_flags)
+{
+    if (!legacy || !out_config || !out_flags ||
+        legacy->magic != DEVICE_WEB_CONFIG_MAGIC ||
+        legacy->version != DEVICE_WEB_CONFIG_VERSION_V5) {
+        return false;
+    }
+
+    *out_config = legacy->config;
+    *out_flags = (legacy->config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) ?
+                 DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM : 0U;
+
+    return device_web_config_validate(out_config);
+}
+
 static bool device_web_config_validate(const device_web_config_t *config)
 {
     if (!config) {
@@ -593,6 +612,7 @@ esp_err_t device_web_config_init(void)
     device_web_config_storage_v3_t loaded_storage_v3;
     device_web_config_t default_config;
     device_web_config_t imported_config;
+    uint32_t imported_flags = 0U;
 
     if (!s_device_web_config_mutex) {
         s_device_web_config_mutex = xSemaphoreCreateMutex();
@@ -653,13 +673,32 @@ esp_err_t device_web_config_init(void)
                 ret = ESP_OK;
             } else {
                 memset(&imported_config, 0, sizeof(imported_config));
+                imported_flags = 0U;
                 if (blob_size == sizeof(loaded_storage) &&
-                    device_web_config_import_v4(&loaded_storage, &imported_config)) {
+                    device_web_config_import_v5(&loaded_storage, &imported_config, &imported_flags)) {
                     device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
-                    ESP_LOGI(TAG, "已迁移 V4 设备网页配置 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                    s_device_web_config_storage.reserved = imported_flags;
+                    ESP_LOGI(TAG, "已迁移 V5 设备网页配置 | 网络=%s | AP=%s | STA=%s | STA待确认=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
                              device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
                              imported_config.wifi_ap_ssid,
                              imported_config.wifi_sta_ssid,
+                             (imported_flags & DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM) ? "是" : "否",
+                             device_web_config_get_video_source_name(imported_config.video_source),
+                             device_web_config_get_video_profile_name(imported_config.video_profile),
+                             imported_config.uart0_baud_rate,
+                             imported_config.uart1_baud_rate);
+                    ret = ESP_OK;
+                } else if (blob_size == sizeof(loaded_storage) &&
+                    device_web_config_import_v4(&loaded_storage, &imported_config)) {
+                    device_web_config_fill_storage(&s_device_web_config_storage, &imported_config);
+                    if (imported_config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+                        s_device_web_config_storage.reserved = DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM;
+                    }
+                    ESP_LOGI(TAG, "已迁移 V4 设备网页配置 | 网络=%s | AP=%s | STA=%s | STA待确认=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+                             device_web_config_get_wifi_mode_name(imported_config.wifi_mode),
+                             imported_config.wifi_ap_ssid,
+                             imported_config.wifi_sta_ssid,
+                             (s_device_web_config_storage.reserved & DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM) ? "是" : "否",
                              device_web_config_get_video_source_name(imported_config.video_source),
                              device_web_config_get_video_profile_name(imported_config.video_profile),
                              imported_config.uart0_baud_rate,
@@ -744,7 +783,8 @@ void device_web_config_get(device_web_config_t *out_config)
     xSemaphoreGive(s_device_web_config_mutex);
 }
 
-esp_err_t device_web_config_save(const device_web_config_t *config)
+static esp_err_t device_web_config_save_with_flags(const device_web_config_t *config,
+                                                   uint32_t flags)
 {
     esp_err_t ret;
     nvs_handle_t nvs = 0;
@@ -768,6 +808,7 @@ esp_err_t device_web_config_save(const device_web_config_t *config)
     }
 
     device_web_config_fill_storage(&new_storage, config);
+    new_storage.reserved = flags;
 
     ret = nvs_open(DEVICE_WEB_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (ret != ESP_OK) {
@@ -796,15 +837,75 @@ esp_err_t device_web_config_save(const device_web_config_t *config)
     }
 
     ESP_LOGI(TAG,
-             "设备网页配置已保存 | 网络=%s | AP=%s | STA=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
+             "设备网页配置已保存 | 网络=%s | AP=%s | STA=%s | STA待确认=%s | 视频源=%s | 分辨率=%s | UART0=%" PRIu32 " | UART1=%" PRIu32,
              device_web_config_get_wifi_mode_name(config->wifi_mode),
              config->wifi_ap_ssid,
              config->wifi_sta_ssid,
+             (flags & DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM) ? "是" : "否",
              device_web_config_get_video_source_name(config->video_source),
              device_web_config_get_video_profile_name(config->video_profile),
              config->uart0_baud_rate,
              config->uart1_baud_rate);
     return ESP_OK;
+}
+
+esp_err_t device_web_config_save(const device_web_config_t *config)
+{
+    return device_web_config_save_with_flags(config, 0U);
+}
+
+esp_err_t device_web_config_save_sta_pending_confirm(const device_web_config_t *config)
+{
+    uint32_t flags = 0U;
+
+    if (!config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (config->wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+        flags |= DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM;
+    }
+
+    return device_web_config_save_with_flags(config, flags);
+}
+
+bool device_web_config_is_sta_pending_confirm(void)
+{
+    bool pending = false;
+
+    if (!s_device_web_config_initialized) {
+        esp_err_t ret = device_web_config_init();
+        if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "读取 STA 待确认状态前初始化配置失败: 0x%x (%s)",
+                     ret, esp_err_to_name(ret));
+        }
+    }
+
+    if (s_device_web_config_mutex &&
+        xSemaphoreTake(s_device_web_config_mutex, portMAX_DELAY) == pdTRUE) {
+        pending = (s_device_web_config_storage.config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) &&
+                  ((s_device_web_config_storage.reserved & DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM) != 0U);
+        xSemaphoreGive(s_device_web_config_mutex);
+    }
+
+    return pending;
+}
+
+esp_err_t device_web_config_clear_sta_pending_confirm(void)
+{
+    device_web_config_t config = {0};
+
+    device_web_config_get(&config);
+    return device_web_config_save_with_flags(&config, 0U);
+}
+
+esp_err_t device_web_config_fallback_to_ap(void)
+{
+    device_web_config_t config = {0};
+
+    device_web_config_get(&config);
+    config.wifi_mode = DEVICE_WEB_CONFIG_WIFI_MODE_AP;
+    return device_web_config_save_with_flags(&config, 0U);
 }
 
 esp_err_t device_web_config_reset_to_factory(void)

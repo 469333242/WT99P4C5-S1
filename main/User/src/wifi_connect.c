@@ -12,12 +12,14 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "lwip/ip4_addr.h"
 
@@ -30,6 +32,7 @@ static const char *TAG = "wifi";
 
 #define WIFI_READY_BIT BIT0
 #define WIFI_VALID_UNIX_SEC 1704067200LL  /* 2024-01-01 00:00:00 UTC */
+#define WIFI_STA_CONFIRM_TIMEOUT_MS 180000
 
 static esp_netif_t *s_ap_netif;
 static esp_netif_t *s_sta_netif;
@@ -37,6 +40,56 @@ static EventGroupHandle_t s_wifi_event_group;
 static volatile uint32_t s_ap_client_count;
 static device_web_config_t s_wifi_config;
 static bool s_wifi_event_registered;
+
+static void wifi_sta_confirm_guard_task(void *arg)
+{
+    (void)arg;
+
+    ESP_LOGW(TAG, "STA 模式待网页确认，%d 秒内未确认将自动回退到 AP 模式",
+             WIFI_STA_CONFIRM_TIMEOUT_MS / 1000);
+    vTaskDelay(pdMS_TO_TICKS(WIFI_STA_CONFIRM_TIMEOUT_MS));
+
+    if (!device_web_config_is_sta_pending_confirm()) {
+        ESP_LOGI(TAG, "STA 模式已通过网页确认，取消自动回退");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGW(TAG, "STA 模式超时未确认，正在保存 AP 回退配置并重启");
+    esp_err_t ret = device_web_config_fallback_to_ap();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "保存 AP 回退配置失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+}
+
+static void wifi_start_sta_confirm_guard_if_needed(void)
+{
+    if (!device_web_config_is_sta_pending_confirm()) {
+        return;
+    }
+
+    BaseType_t task_ret = xTaskCreate(wifi_sta_confirm_guard_task,
+                                      "sta_confirm_guard",
+                                      4096,
+                                      NULL,
+                                      tskIDLE_PRIORITY + 1,
+                                      NULL);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "创建 STA 确认保护任务失败");
+        esp_err_t ret = device_web_config_fallback_to_ap();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "保护任务失败后保存 AP 回退配置失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_restart();
+    }
+}
 
 static esp_err_t wifi_configure_ap_ip(esp_netif_t *netif)
 {
@@ -147,6 +200,11 @@ uint32_t wifi_connect_get_ap_client_count(void)
     }
 
     return s_ap_client_count;
+}
+
+uint32_t wifi_connect_get_active_wifi_mode(void)
+{
+    return s_wifi_config.wifi_mode;
 }
 
 static void wifi_log_ap_ready(void)
@@ -370,6 +428,7 @@ static esp_err_t wifi_start_sta(void)
     ESP_LOGI(TAG, "Wi-Fi STA 初始化完成 | SSID=%s | IP模式=%s",
              s_wifi_config.wifi_sta_ssid,
              s_wifi_config.wifi_sta_use_static_ip ? "静态 IP" : "DHCP");
+    wifi_start_sta_confirm_guard_if_needed();
     return ESP_OK;
 }
 

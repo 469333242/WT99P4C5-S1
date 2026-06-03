@@ -90,3 +90,10 @@ esp_err_t wifi_connect_wait_for_time(int timeout_ms);
  * @brief 获取当前连接到 AP 的客户端数量
  */
 uint32_t wifi_connect_get_ap_client_count(void);
+
+/**
+ * @brief 获取当前本次启动实际启用的 Wi-Fi 模式
+ *
+ * 用于区分“网页已保存的新配置”和“当前已经运行的网络模式”。
+ */
+uint32_t wifi_connect_get_active_wifi_mode(void);

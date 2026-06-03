@@ -587,6 +587,7 @@ static const char *s_photo_index_html_v6[] = {
     "        <div class='settingActions'>\n",
     "          <button id='refreshStatusBtn' class='ghostBtn' type='button'>读取状态</button>\n",
     "          <button id='syncTimeBtn' class='ghostBtn' type='button'>同步时间</button>\n",
+    "          <button id='confirmStaBtn' class='primaryBtn hidden' type='button'>确认 STA 可访问</button>\n",
     "          <button id='rebootBtn' class='ghostBtn' type='button'>重启设备</button>\n",
     "        </div>\n",
     "      </section>\n",
@@ -685,7 +686,7 @@ static const char *s_photo_index_html_v6[] = {
     "          <div class='apInfoItem'><div class='field'><label for='wifiStaMask'>子网掩码</label><input id='wifiStaMask' type='text' maxlength='15' placeholder='255.255.255.0'></div></div>\n",
     "          <div class='apInfoItem'><div class='apInfoLabel'>工作方式</div><div class='apInfoValue'>连接外部路由器</div></div>\n",
     "        </div>\n",
-    "        <div class='settingHint'>AP 与 STA 不会同时启用；网络场景、摄像头选择、热点或 STA 入网参数、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，成像效果可在 USB 热像仪工作时即时下发。</div>\n",
+    "        <div class='settingHint'>AP 与 STA 不会同时启用；切换到 STA 后必须在新地址网页确认可访问，否则约 180 秒后自动回退 AP；网络场景、摄像头选择、热点或 STA 入网参数、波特率和 MIPI 分辨率在保存后需要重启设备生效。USB 热像仪使用固定 512 x 390 采集画面，成像效果可在 USB 热像仪工作时即时下发。</div>\n",
     "        <div class='settingActions'>\n",
     "          <button id='saveConfigBtn' class='primaryBtn' type='button'>保存配置</button>\n",
     "          <button id='factoryResetBtn' class='dangerBtn' type='button'>恢复默认配置</button>\n",
@@ -777,6 +778,7 @@ static const char *s_photo_index_html_v6[] = {
     "        rtspClients: document.getElementById('deviceRtspClients'),\n",
     "        refreshStatusBtn: document.getElementById('refreshStatusBtn'),\n",
     "        syncTimeBtn: document.getElementById('syncTimeBtn'),\n",
+    "        confirmStaBtn: document.getElementById('confirmStaBtn'),\n",
     "        rebootBtn: document.getElementById('rebootBtn'),\n",
     "        videoSource: document.getElementById('videoSource'),\n",
     "        videoProfileLabel: document.getElementById('videoProfileLabel'),\n",
@@ -950,7 +952,8 @@ static const char *s_photo_index_html_v6[] = {
     "    function renderDeviceStatus() {\n",
     "      const info = state.deviceStatus || {};\n",
     "      const tfMounted = !!info.tf_mounted;\n",
-    "      const apMode = Number(info.wifi_mode_value) === 0;\n",
+    "      const activeWifiMode = (info.active_wifi_mode_value !== undefined) ? info.active_wifi_mode_value : info.wifi_mode_value;\n",
+    "      const apMode = Number(activeWifiMode) === 0;\n",
     "      updateDeviceClockBase(info);\n",
     "      renderDeviceClock();\n",
     "      refs.device.apClients.textContent = apMode ? String(Number(info.ap_connected_clients) || 0) : '--';\n",
@@ -964,6 +967,9 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.tfPhotoCount.textContent = tfMounted ? formatPhotoCount(Number(info.tf_est_photo_count)) : '--';\n",
     "      refs.device.tfSpeed.textContent = info.tf_speed_text || '--';\n",
     "      refs.device.rtspClients.textContent = String(Number(info.active_clients) || 0);\n",
+    "      if (info.sta_pending_confirm && Number(activeWifiMode) === 1) {\n",
+    "        setStatus('当前 STA 模式待确认，请确认网页可访问以取消自动回退 AP', false);\n",
+    "      }\n",
     "      updateActionStates();\n",
     "    }\n",
     "    function renderDeviceConfig() {\n",
@@ -996,6 +1002,8 @@ static const char *s_photo_index_html_v6[] = {
     "      const thermalSelected = videoSource !== '0';\n",
     "      const staMode = refs.device.wifiMode.value === '1';\n",
     "      const staStaticIp = refs.device.wifiStaIpMode.value === '1';\n",
+    "      const staPendingConfirm = !!((state.deviceStatus && state.deviceStatus.sta_pending_confirm) || (state.deviceConfig && state.deviceConfig.sta_pending_confirm));\n",
+    "      const activeStaMode = Number((state.deviceStatus && state.deviceStatus.active_wifi_mode_value) || (state.deviceConfig && state.deviceConfig.active_wifi_mode_value)) === 1;\n",
     "      refs.device.videoProfileLabel.textContent = thermalSelected ? '热成像效果' : 'MIPI 分辨率';\n",
     "      refs.device.videoProfileLabel.setAttribute('for', thermalSelected ? 'thermalEffect' : 'videoProfile');\n",
     "      refs.device.videoProfile.classList.toggle('hidden', thermalSelected);\n",
@@ -1004,6 +1012,8 @@ static const char *s_photo_index_html_v6[] = {
     "      refs.device.staConfigBox.classList.toggle('hidden', !staMode);\n",
     "      refs.device.refreshStatusBtn.disabled = state.busy;\n",
     "      refs.device.syncTimeBtn.disabled = state.busy;\n",
+    "      refs.device.confirmStaBtn.classList.toggle('hidden', !staPendingConfirm || !activeStaMode);\n",
+    "      refs.device.confirmStaBtn.disabled = state.busy || !staPendingConfirm || !activeStaMode;\n",
     "      refs.device.rebootBtn.disabled = state.busy;\n",
     "      refs.device.videoSource.disabled = state.busy;\n",
     "      refs.device.videoProfile.disabled = state.busy || thermalSelected;\n",
@@ -1289,6 +1299,9 @@ static const char *s_photo_index_html_v6[] = {
     "    async function requestDeviceReboot() {\n",
     "      return fetchJson('/api/reboot', { method: 'POST' });\n",
     "    }\n",
+    "    async function requestConfirmStaAccess() {\n",
+    "      return fetchJson('/api/sta_confirm', { method: 'POST' });\n",
+    "    }\n",
     "    async function refreshDeviceStatusPanel(runSpeedTest) {\n",
     "      state.deviceStatus = await fetchDeviceStatus(!!runSpeedTest);\n",
     "      renderDeviceStatus();\n",
@@ -1420,7 +1433,11 @@ static const char *s_photo_index_html_v6[] = {
     "      try {\n",
     "        await requestSaveDeviceConfig();\n",
     "        await refreshDevicePanel(false);\n",
-    "        setStatus('配置已保存，请重启设备使新配置生效', false);\n",
+    "        if (refs.device.wifiMode.value === '1') {\n",
+    "          setStatus('配置已保存，请重启后在 STA 新地址网页点击确认，否则会自动回退 AP', false);\n",
+    "        } else {\n",
+    "          setStatus('配置已保存，请重启设备使新配置生效', false);\n",
+    "        }\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '保存设备配置失败', true);\n",
     "      } finally {\n",
@@ -1479,6 +1496,22 @@ static const char *s_photo_index_html_v6[] = {
     "        setStatus('设备正在重启，请稍后手动刷新页面', false);\n",
     "      } catch (error) {\n",
     "        setStatus(error.message || '发送重启指令失败', true);\n",
+    "      } finally {\n",
+    "        setBusy(false);\n",
+    "      }\n",
+    "    }\n",
+    "    async function confirmStaAccess() {\n",
+    "      if (state.busy) {\n",
+    "        return;\n",
+    "      }\n",
+    "      setBusy(true);\n",
+    "      setStatus('正在确认 STA 网页可访问...', false);\n",
+    "      try {\n",
+    "        await requestConfirmStaAccess();\n",
+    "        await refreshDevicePanel(false);\n",
+    "        setStatus('STA 模式已确认，不会自动回退 AP', false);\n",
+    "      } catch (error) {\n",
+    "        setStatus(error.message || '确认 STA 模式失败', true);\n",
     "      } finally {\n",
     "        setBusy(false);\n",
     "      }\n",
@@ -1605,6 +1638,7 @@ static const char *s_photo_index_html_v6[] = {
     "    refs.deleteSelectionBtn.addEventListener('click', () => deletePaths(Array.from(state.photo.selected).concat(Array.from(state.video.selected))));\n",
     "    refs.device.refreshStatusBtn.addEventListener('click', () => loadDeviceStatusOnly());\n",
     "    refs.device.syncTimeBtn.addEventListener('click', syncDeviceClockAndRefresh);\n",
+    "    refs.device.confirmStaBtn.addEventListener('click', confirmStaAccess);\n",
     "    refs.device.rebootBtn.addEventListener('click', rebootDevice);\n",
     "    refs.device.saveConfigBtn.addEventListener('click', saveDeviceConfig);\n",
     "    refs.device.factoryResetBtn.addEventListener('click', restoreFactoryConfig);\n",
@@ -2571,6 +2605,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         ",\"video_source\":%" PRIu32 ",\"video_source_name\":\"%s\""
                         ",\"wifi_ap_ip\":\"%s\",\"wifi_sta_ssid\":\"%s\""
                         ",\"wifi_sta_use_static_ip\":%s,\"wifi_sta_ip\":\"%s\""
+                        ",\"sta_pending_confirm\":%s,\"active_wifi_mode_value\":%" PRIu32
                         ",\"wifi_ap_max_connections\":%d"
                         ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\",\"tcp_uart0_url\":\"%s\""
                         ",\"tcp_uart1_url\":\"%s\",\"ap_connected_clients\":%" PRIu32
@@ -2595,6 +2630,8 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         config.wifi_sta_ssid,
                         config.wifi_sta_use_static_ip ? "true" : "false",
                         config.wifi_sta_ip,
+                        device_web_config_is_sta_pending_confirm() ? "true" : "false",
+                        wifi_connect_get_active_wifi_mode(),
                         WIFI_AP_MAX_CONNECTIONS,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url,
                         ap_connected_clients,
@@ -2667,6 +2704,7 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         ",\"wifi_sta_ssid\":\"%s\",\"wifi_sta_password\":\"%s\""
                         ",\"wifi_sta_use_static_ip\":%s,\"wifi_sta_ip\":\"%s\""
                         ",\"wifi_sta_gateway\":\"%s\",\"wifi_sta_mask\":\"%s\""
+                        ",\"sta_pending_confirm\":%s,\"active_wifi_mode_value\":%" PRIu32
                         ",\"wifi_ap_max_connections\":%d"
                         ",\"current_ip\":\"%s\",\"current_gw\":\"%s\",\"current_mask\":\"%s\""
                         ",\"web_url\":\"%s\",\"rtsp_url\":\"%s\""
@@ -2686,6 +2724,8 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         config.wifi_sta_ssid, config.wifi_sta_password,
                         config.wifi_sta_use_static_ip ? "true" : "false",
                         config.wifi_sta_ip, config.wifi_sta_gw, config.wifi_sta_mask,
+                        device_web_config_is_sta_pending_confirm() ? "true" : "false",
+                        wifi_connect_get_active_wifi_mode(),
                         WIFI_AP_MAX_CONNECTIONS,
                         ip_text, gw_text, mask_text,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url);
@@ -2790,7 +2830,11 @@ static esp_err_t photo_web_api_config_post_handler(httpd_req_t *req)
         return photo_web_send_json_error(req, "400 Bad Request", "配置参数不完整或格式错误");
     }
 
-    ret = device_web_config_save(&config);
+    if (config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+        ret = device_web_config_save_sta_pending_confirm(&config);
+    } else {
+        ret = device_web_config_save(&config);
+    }
     if (ret == ESP_ERR_INVALID_ARG) {
         return photo_web_send_json_error(req, "400 Bad Request", "配置参数非法或当前固件不支持该分辨率");
     }
@@ -2951,6 +2995,33 @@ static esp_err_t photo_web_api_factory_reset_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     photo_web_set_no_cache(req);
     return httpd_resp_sendstr(req, "{\"ok\":true,\"reboot_required\":true}");
+}
+
+static esp_err_t photo_web_api_sta_confirm_handler(httpd_req_t *req)
+{
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (wifi_connect_get_active_wifi_mode() != DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+        ESP_LOGW(TAG, "拒绝 STA 确认请求，当前尚未运行在 STA 模式");
+        return photo_web_send_json_error(req, "409 Conflict", "当前尚未运行在 STA 模式");
+    }
+
+    if (device_web_config_is_sta_pending_confirm()) {
+        ret = device_web_config_clear_sta_pending_confirm();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "确认 STA 模式失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+            return photo_web_send_json_error(req, "500 Internal Server Error", "确认 STA 模式失败");
+        }
+        ESP_LOGI(TAG, "网页已确认 STA 模式可访问，取消自动回退 AP");
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    return httpd_resp_sendstr(req, "{\"ok\":true,\"sta_pending_confirm\":false}");
 }
 
 static esp_err_t photo_web_api_reboot_handler(httpd_req_t *req)
@@ -3564,7 +3635,7 @@ esp_err_t photo_web_server_start(void)
     config.server_port = PHOTO_WEB_SERVER_PORT;
     config.stack_size = PHOTO_WEB_SERVER_STACK_SIZE;
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 18;
+    config.max_uri_handlers = 19;
     config.backlog_conn = 4;
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -3642,6 +3713,12 @@ esp_err_t photo_web_server_start(void)
         .handler = photo_web_api_factory_reset_handler,
         .user_ctx = NULL,
     };
+    const httpd_uri_t api_sta_confirm_uri = {
+        .uri = "/api/sta_confirm",
+        .method = HTTP_POST,
+        .handler = photo_web_api_sta_confirm_handler,
+        .user_ctx = NULL,
+    };
     const httpd_uri_t api_reboot_uri = {
         .uri = "/api/reboot",
         .method = HTTP_POST,
@@ -3705,6 +3782,10 @@ esp_err_t photo_web_server_start(void)
     if (ret == ESP_OK)
     {
         ret = httpd_register_uri_handler(s_photo_web.server, &api_factory_reset_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_sta_confirm_uri);
     }
     if (ret == ESP_OK)
     {
