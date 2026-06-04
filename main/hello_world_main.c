@@ -5,6 +5,7 @@
  * 负责系统初始化与各模块启动，具体实现位于 User/src 与 User/include 目录：
  *   - device_web_config: 网页设备配置读写（网络场景、波特率、分辨率）
  *   - wifi_connect     : WiFi AP/STA 网络（通过 ESP32-C5 SDIO 协处理器）
+ *   - z1mini_bridge    : Z-1mini 吊舱网口透传（WiFi AP <-> 以太网）
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
  *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
@@ -13,6 +14,7 @@
  *
  * 访问方式：
  *   视频流  : rtsp://<设备IP>:8554/stream
+ *   吊舱流  : rtsp://192.168.144.108
  *   网页    : http://<设备IP>/
  *   串口0   : TCP <设备IP>:8880
  *   串口1   : TCP <设备IP>:8881
@@ -32,7 +34,7 @@
 /* 用户模块 */
 #include "wifi_connect.h"
 #include "eth_connect.h" 
-#include "eth_tcp_server.h"
+#include "z1mini_bridge.h"
 #include "device_web_config.h"
 #include "rtsp_server.h"
 #include "camera.h"
@@ -42,13 +44,14 @@
 #include "tf_card.h"
 #include "usb_thermal_camera.h"
 
-/* 网络连接模式选择：0=WiFi, 1=以太网 */
-#define USE_ETHERNET    0   //切换网络连接方式：0=WiFi, 1=以太网
-#define ETH_ENABLE_TCP_SERVER   0   //网口 TCP 透传服务开关
+/* 网络连接模式选择：优先使用 Z-1mini 网口透传；关闭后再按 USE_ETHERNET 选择普通网络模式 */
+#define Z1MINI_BRIDGE_ENABLE   1   //Z-1mini 网口透传：WiFi AP + 以太网原始帧转发
+#define USE_ETHERNET           0   //切换网络连接方式：0=WiFi, 1=以太网
 #define HOSTED_WIFI_READY_DELAY_MS 6000
 #define WIFI_WAIT_SLICE_MS         15000
 #define WIFI_TIME_WAIT_MS          8000
 #define ETH_IP_WAIT_SLICE_MS       15000
+#define Z1MINI_BRIDGE_WAIT_SLICE_MS 15000
 #define MIPI_CAMERA_START_TASK_STACK_SIZE (12 * 1024)
 #define MIPI_CAMERA_START_TASK_PRIORITY   (tskIDLE_PRIORITY + 4)
 
@@ -56,6 +59,12 @@
 #define ETH_STATIC_IP          "169.254.27.100"
 #define ETH_STATIC_GW          "169.254.27.1"
 #define ETH_STATIC_MASK        "255.255.255.0"
+
+#define Z1MINI_BRIDGE_IP       "192.168.144.1"
+#define Z1MINI_BRIDGE_GW       "192.168.144.1"
+#define Z1MINI_BRIDGE_MASK     "255.255.255.0"
+#define Z1MINI_DEVICE_IP       "192.168.144.108"
+#define Z1MINI_RTSP_URL        "rtsp://192.168.144.108"
 
 static const char *TAG = "main";
 
@@ -105,13 +114,12 @@ static void hosted_event_handler(void *arg, esp_event_base_t base,
  *   2. 设备网页配置初始化
  *   3. esp_netif + 事件循环
  *   4. ESP-Hosted → 等待与 C5 建立 SDIO 链路
- *   5. WiFi AP/STA 启动
+ *   5. 按编译开关选择 Z-1mini 网口透传、普通 WiFi 或普通以太网
  *   6. TF 卡初始化
  *   7. 媒体存储模块初始化
  *   8. RTSP 服务器启动
  *   9. UART TCP 透传服务启动
- *   10. 以太网初始化并等待链路可用
- *   11. 按网页配置选择 MIPI 摄像头或 USB 热像仪 RTSP 链路
+ *   10. 按网页配置选择 MIPI 摄像头或 USB 热像仪 RTSP 链路
  */
 void app_main(void)
 {
@@ -134,7 +142,52 @@ void app_main(void)
     esp_netif_init();
     esp_event_loop_create_default();
 
-#if USE_ETHERNET
+#if Z1MINI_BRIDGE_ENABLE
+    /* Z-1mini 网口透传：电脑连接 AP 后与吊舱处在同一个 192.168.144.0/24 网段。 */
+    ESP_LOGI(TAG, "使用 Z-1mini 网口透传 | WT99=%s | 吊舱=%s | RTSP=%s",
+             Z1MINI_BRIDGE_IP, Z1MINI_DEVICE_IP, Z1MINI_RTSP_URL);
+
+    /* 3. ESP-Hosted：建立与 C5 的 SDIO 链路 */
+    s_hosted_up_sem = xSemaphoreCreateBinary();
+    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID,
+                                hosted_event_handler, NULL);
+    esp_hosted_init();
+    esp_hosted_connect_to_slave();
+
+    ESP_LOGI(TAG, "等待与 C5 建立 SDIO 连接...");
+    xSemaphoreTake(s_hosted_up_sem, portMAX_DELAY);
+    ESP_LOGI(TAG, "SDIO 连接已建立");
+
+    /* 4. 启动 WiFi AP + 以太网原始帧转发，吊舱 UDP/RTSP 保持同网段透传。 */
+    vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
+    err = z1mini_bridge_init(Z1MINI_BRIDGE_IP,
+                             Z1MINI_BRIDGE_GW,
+                             Z1MINI_BRIDGE_MASK,
+                             Z1MINI_DEVICE_IP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Z-1mini 网口透传初始化失败: 0x%x", err);
+        return;
+    }
+
+    ESP_LOGI(TAG, "等待透传 AP 就绪...");
+    while ((err = z1mini_bridge_wait_for_ready(Z1MINI_BRIDGE_WAIT_SLICE_MS)) != ESP_OK) {
+        ESP_LOGW(TAG, "透传 AP 尚未就绪，继续等待...");
+    }
+
+    ESP_LOGI(TAG, "透传 AP 已就绪，正在检测吊舱网口链路...");
+    err = z1mini_bridge_wait_for_eth_link(Z1MINI_BRIDGE_WAIT_SLICE_MS);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "吊舱网口链路已连接 | 吊舱访问地址: %s", Z1MINI_RTSP_URL);
+    } else {
+        ESP_LOGW(TAG, "吊舱网口链路暂未连接，继续启动本机服务；请检查吊舱供电和网线");
+    }
+
+    err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "系统时间尚未同步，请打开媒体网页同步电脑时间");
+    }
+
+#elif USE_ETHERNET
     /* 使用以太网连接 */
     ESP_LOGI(TAG, "使用以太网连接");
 
@@ -150,16 +203,6 @@ void app_main(void)
         ESP_LOGW(TAG, "以太网 IP 未就绪，继续等待链路建立...");
     }
     ESP_LOGI(TAG, "以太网 IP 已就绪，开始启动视频与网页服务");
-
-#if ETH_ENABLE_TCP_SERVER
-    err = eth_tcp_server_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "网口 TCP 服务启动失败: 0x%x", err);
-        return;
-    }
-    ESP_LOGI(TAG, "网口 TCP 服务已启动，访问地址: %s:%d",
-             ETH_STATIC_IP, ETH_TCP_SERVER_PORT);
-#endif
 
 #else
     /* 使用 WiFi，具体 AP/STA 场景由网页配置决定。 */

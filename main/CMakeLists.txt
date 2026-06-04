@@ -7,8 +7,8 @@ idf_component_register(SRCS "hello_world_main.c"
                              "User/src/photo_web_server.c"
                              "User/src/rtsp_server.c"
                              "User/src/tcp_uart_server.c"
-                             "User/src/eth_tcp_server.c"
                              "User/src/eth_connect.c"
+                             "User/src/z1mini_bridge.c"
                              "User/src/tf_card.c"
                              "User/src/usb_thermal_camera.c"
                        PRIV_REQUIRES
@@ -29,6 +29,7 @@ idf_component_register(SRCS "hello_world_main.c"
                            esp_muxer
                            esp_eth
                            esp_timer
+                           lwip
                            usb
                            usb_host_uvc
                            fatfs

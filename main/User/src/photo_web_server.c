@@ -47,6 +47,7 @@
 #include "tf_card.h"
 #include "usb_thermal_camera.h"
 #include "wifi_connect.h"
+#include "z1mini_bridge.h"
 
 static const char *TAG = "photo_web";
 
@@ -2120,8 +2121,16 @@ static esp_err_t photo_web_form_get_u32(const char *body, const char *key,
 
 static esp_netif_t *photo_web_get_active_netif(void)
 {
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_netif_t *netif = NULL;
 
+    if (z1mini_bridge_is_running()) {
+        netif = z1mini_bridge_get_netif();
+        if (netif) {
+            return netif;
+        }
+    }
+
+    netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (netif) {
         return netif;
     }
@@ -2132,6 +2141,24 @@ static esp_netif_t *photo_web_get_active_netif(void)
     }
 
     return esp_netif_get_handle_from_ifkey("ETH_DEF");
+}
+
+static uint32_t photo_web_get_active_wifi_mode(void)
+{
+    if (z1mini_bridge_is_running()) {
+        return DEVICE_WEB_CONFIG_WIFI_MODE_AP;
+    }
+
+    return wifi_connect_get_active_wifi_mode();
+}
+
+static uint32_t photo_web_get_ap_client_count(void)
+{
+    if (z1mini_bridge_is_running()) {
+        return z1mini_bridge_get_ap_client_count();
+    }
+
+    return wifi_connect_get_ap_client_count();
 }
 
 static void photo_web_copy_text_or_default(char *dst, size_t dst_size, const char *text)
@@ -2587,7 +2614,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                             tcp_uart0_url, sizeof(tcp_uart0_url),
                             tcp_uart1_url, sizeof(tcp_uart1_url));
     photo_web_build_current_time_text(time_text, sizeof(time_text), &unix_ms, &time_valid);
-    ap_connected_clients = wifi_connect_get_ap_client_count();
+    ap_connected_clients = photo_web_get_ap_client_count();
     ret = media_storage_get_tf_status(run_speed_test, &tf_status);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "读取 TF 卡状态失败: 0x%x (%s)", ret, esp_err_to_name(ret));
@@ -2631,7 +2658,7 @@ static esp_err_t photo_web_api_status_handler(httpd_req_t *req)
                         config.wifi_sta_use_static_ip ? "true" : "false",
                         config.wifi_sta_ip,
                         device_web_config_is_sta_pending_confirm() ? "true" : "false",
-                        wifi_connect_get_active_wifi_mode(),
+                        photo_web_get_active_wifi_mode(),
                         WIFI_AP_MAX_CONNECTIONS,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url,
                         ap_connected_clients,
@@ -2725,7 +2752,7 @@ static esp_err_t photo_web_api_config_get_handler(httpd_req_t *req)
                         config.wifi_sta_use_static_ip ? "true" : "false",
                         config.wifi_sta_ip, config.wifi_sta_gw, config.wifi_sta_mask,
                         device_web_config_is_sta_pending_confirm() ? "true" : "false",
-                        wifi_connect_get_active_wifi_mode(),
+                        photo_web_get_active_wifi_mode(),
                         WIFI_AP_MAX_CONNECTIONS,
                         ip_text, gw_text, mask_text,
                         web_url, rtsp_url, tcp_uart0_url, tcp_uart1_url);
@@ -3005,7 +3032,7 @@ static esp_err_t photo_web_api_sta_confirm_handler(httpd_req_t *req)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (wifi_connect_get_active_wifi_mode() != DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+    if (photo_web_get_active_wifi_mode() != DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
         ESP_LOGW(TAG, "拒绝 STA 确认请求，当前尚未运行在 STA 模式");
         return photo_web_send_json_error(req, "409 Conflict", "当前尚未运行在 STA 模式");
     }

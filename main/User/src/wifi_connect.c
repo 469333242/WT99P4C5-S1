@@ -322,6 +322,31 @@ static esp_err_t wifi_register_events_once(void)
     return ESP_OK;
 }
 
+static esp_err_t wifi_prepare_driver(void)
+{
+    esp_err_t ret;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+
+    if (!s_wifi_event_group) {
+        s_wifi_event_group = xEventGroupCreate();
+        if (!s_wifi_event_group) {
+            ESP_LOGE(TAG, "创建 Wi-Fi 事件组失败");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    xEventGroupClearBits(s_wifi_event_group, WIFI_READY_BIT);
+
+    ESP_RETURN_ON_ERROR(wifi_register_events_once(), TAG, "注册 Wi-Fi 事件失败");
+
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "初始化 Wi-Fi 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return ret;
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t wifi_start_ap(void)
 {
     esp_err_t ret;
@@ -435,24 +460,11 @@ static esp_err_t wifi_start_sta(void)
 esp_err_t wifi_connect_init(void)
 {
     esp_err_t ret;
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 
     device_web_config_get(&s_wifi_config);
 
-    if (!s_wifi_event_group) {
-        s_wifi_event_group = xEventGroupCreate();
-        if (!s_wifi_event_group) {
-            ESP_LOGE(TAG, "创建 Wi-Fi 事件组失败");
-            return ESP_ERR_NO_MEM;
-        }
-    }
-    xEventGroupClearBits(s_wifi_event_group, WIFI_READY_BIT);
-
-    ESP_RETURN_ON_ERROR(wifi_register_events_once(), TAG, "注册 Wi-Fi 事件失败");
-
-    ret = esp_wifi_init(&cfg);
+    ret = wifi_prepare_driver();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "初始化 Wi-Fi 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
         return ret;
     }
 
