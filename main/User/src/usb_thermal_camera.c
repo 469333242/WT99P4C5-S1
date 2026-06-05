@@ -177,6 +177,7 @@ static TaskHandle_t s_capture_task_handle;
 static SemaphoreHandle_t s_control_mutex;
 #endif
 static bool s_started;
+static bool s_usb_thermal_external_active_requested;
 static usb_thermal_camera_effect_t s_current_effect = USB_THERMAL_CAMERA_EFFECT_WHITE_HOT;
 static usb_thermal_camera_capture_t s_capture;
 static usb_thermal_camera_rtsp_t s_rtsp;
@@ -185,7 +186,9 @@ static uint8_t s_iron_red_u[256];
 static uint8_t s_iron_red_v[256];
 static bool s_iron_red_palette_ready;
 
-#define USB_THERMAL_RTSP_START_BIT BIT0
+#define USB_THERMAL_RTSP_START_BIT     BIT0
+#define USB_THERMAL_EXTERNAL_START_BIT BIT1
+#define USB_THERMAL_ACTIVE_BITS        (USB_THERMAL_RTSP_START_BIT | USB_THERMAL_EXTERNAL_START_BIT)
 
 static const char *s_uvc_format_name[] = {
     "DEFAULT",
@@ -1384,11 +1387,9 @@ static void usb_thermal_rtsp_on_playing(bool playing)
 
     if (playing) {
         rtsp_reset_tx_stats();
-        media_storage_start_video_record();
         xEventGroupSetBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT);
     } else {
         rtsp_reset_tx_stats();
-        media_storage_stop_video_record();
         xEventGroupClearBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT);
     }
 }
@@ -1576,8 +1577,8 @@ static void usb_thermal_rtsp_task(void *arg)
     }
 
     while (1) {
-        xEventGroupWaitBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT,
-                            pdFALSE, pdTRUE, portMAX_DELAY);
+        xEventGroupWaitBits(s_rtsp.event, USB_THERMAL_ACTIVE_BITS,
+                            pdFALSE, pdFALSE, portMAX_DELAY);
 
         if (!usb_thermal_camera_is_ready()) {
             vTaskDelay(pdMS_TO_TICKS(USB_THERMAL_CAMERA_RTSP_READY_WAIT_MS));
@@ -1708,12 +1709,12 @@ static void usb_thermal_rtsp_task(void *arg)
             ESP_LOGW(TAG, "USB 热像仪 H.264 编码失败，跳过当前帧");
         }
 
-        if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_RTSP_START_BIT) == 0) {
+        if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_ACTIVE_BITS) == 0) {
 #if USB_THERMAL_CAMERA_VERBOSE_LOG_ENABLE
             report_start_us = 0;
 #endif
             vTaskDelay(pdMS_TO_TICKS(USB_THERMAL_CAMERA_RTSP_IDLE_RELEASE_MS));
-            if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_RTSP_START_BIT) == 0) {
+            if ((xEventGroupGetBits(s_rtsp.event) & USB_THERMAL_ACTIVE_BITS) == 0) {
                 ESP_LOGI(TAG, "USB 热像仪 RTSP 无客户端，释放编码资源");
                 usb_thermal_rtsp_release_encoder();
             }
@@ -1883,8 +1884,14 @@ esp_err_t usb_thermal_camera_rtsp_init(void)
         ESP_LOGE(TAG, "USB 热像仪 RTSP 事件组创建失败");
         return ESP_ERR_NO_MEM;
     }
+    if (s_usb_thermal_external_active_requested) {
+        xEventGroupSetBits(s_rtsp.event, USB_THERMAL_EXTERNAL_START_BIT);
+    }
 
     rtsp_set_playing_callback(usb_thermal_rtsp_on_playing);
+    if (rtsp_get_active_client_count() > 0U) {
+        xEventGroupSetBits(s_rtsp.event, USB_THERMAL_RTSP_START_BIT);
+    }
 
     BaseType_t task_ok = xTaskCreatePinnedToCore(usb_thermal_rtsp_task,
                                                  "usb_thermal_rtsp",
@@ -1911,6 +1918,25 @@ esp_err_t usb_thermal_camera_rtsp_init(void)
              (uint32_t)USB_THERMAL_CAMERA_RTSP_FPS);
 
     return ESP_OK;
+#endif
+}
+
+void usb_thermal_camera_set_external_active(bool active)
+{
+#if USB_THERMAL_CAMERA_ENABLE == 0
+    (void)active;
+#else
+    s_usb_thermal_external_active_requested = active;
+
+    if (!s_rtsp.event) {
+        return;
+    }
+
+    if (active) {
+        xEventGroupSetBits(s_rtsp.event, USB_THERMAL_EXTERNAL_START_BIT);
+    } else {
+        xEventGroupClearBits(s_rtsp.event, USB_THERMAL_EXTERNAL_START_BIT);
+    }
 #endif
 }
 

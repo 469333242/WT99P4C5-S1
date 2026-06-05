@@ -60,6 +60,14 @@ esp_err_t usb_thermal_camera_start(void);
 esp_err_t usb_thermal_camera_rtsp_init(void);
 
 /**
+ * @brief 控制外部请求的热像仪 RTSP 采集保持状态
+ *
+ * RTSP 播放和 A3/网页拍照录像请求共用该保持位。没有 RTSP 客户端时，
+ * 外部请求可通过该接口临时拉起热像仪编码链路。
+ */
+void usb_thermal_camera_set_external_active(bool active);
+
+/**
  * @brief 判断 USB 热像仪是否已经收到至少一帧有效 Y16 数据
  */
 bool usb_thermal_camera_is_ready(void);

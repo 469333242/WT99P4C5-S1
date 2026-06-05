@@ -4,7 +4,7 @@
  *
  * 协议栈：RTSP over TCP，RTP interleaved（RFC 2326 §10.12）
  * 视频编码：H.264 over RTP（RFC 6184）
- * 访问地址：rtsp://<设备IP>:8554/stream
+ * 访问地址：rtsp://<设备IP>，A3 热成像兼容 rtsp://<设备IP>:580/live/6
  *
  * 架构：
  *   - rtsp_server_task  : 仅负责 accept 新连接（core 1）
@@ -147,6 +147,11 @@ typedef struct {
     uint32_t last_pts;
     bool     last_pts_valid;
 } rtsp_tx_stats_internal_t;
+
+typedef struct {
+    uint16_t port;
+    const char *task_name;
+} rtsp_listener_cfg_t;
 
 static rtsp_tx_stats_internal_t s_tx_stats;
 static portMUX_TYPE s_tx_stats_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -856,7 +861,7 @@ static bool extract_request_uri(const char *req, char *dst, size_t dst_size)
 static void build_base_uri(const char *req, char *dst, size_t dst_size)
 {
     if (!extract_request_uri(req, dst, dst_size)) {
-        snprintf(dst, dst_size, "rtsp://0.0.0.0:%d/stream/", RTSP_PORT);
+        snprintf(dst, dst_size, "rtsp://0.0.0.0/");
         return;
     }
 
@@ -870,7 +875,7 @@ static void build_base_uri(const char *req, char *dst, size_t dst_size)
 static void build_track_uri(const char *req, char *dst, size_t dst_size)
 {
     if (!extract_request_uri(req, dst, dst_size)) {
-        snprintf(dst, dst_size, "rtsp://0.0.0.0:%d/stream/trackID=1", RTSP_PORT);
+        snprintf(dst, dst_size, "rtsp://0.0.0.0/trackID=1");
         return;
     }
 
@@ -1318,6 +1323,8 @@ static void rtsp_session_task(void *arg)
 
 static void rtsp_server_task(void *arg)
 {
+    const rtsp_listener_cfg_t *listener = (const rtsp_listener_cfg_t *)arg;
+    uint16_t listen_port = listener ? listener->port : RTSP_PORT;
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         ESP_LOGE(TAG, "socket() 失败: %d", errno);
@@ -1330,7 +1337,7 @@ static void rtsp_server_task(void *arg)
 
     struct sockaddr_in addr = {
         .sin_family      = AF_INET,
-        .sin_port        = htons(RTSP_PORT),
+        .sin_port        = htons(listen_port),
         .sin_addr.s_addr = htonl(INADDR_ANY),
     };
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -1340,7 +1347,7 @@ static void rtsp_server_task(void *arg)
         return;
     }
     listen(listen_fd, MAX_CLIENTS);
-    ESP_LOGI(TAG, "RTSP 服务器监听端口 %d", RTSP_PORT);
+    ESP_LOGI(TAG, "RTSP 服务器监听端口 %" PRIu16, listen_port);
 
     while (1) {
         struct sockaddr_in cli_addr;
@@ -1450,6 +1457,11 @@ void rtsp_set_playing_callback(rtsp_playing_cb_t cb)
 
 esp_err_t rtsp_server_start(void)
 {
+    static const rtsp_listener_cfg_t s_rtsp_listeners[] = {
+        {.port = RTSP_PORT, .task_name = "rtsp_srv"},
+        {.port = RTSP_THERMAL_PORT, .task_name = "rtsp_srv580"},
+    };
+
     memset(s_clients, 0, sizeof(s_clients));
     for (int i = 0; i < MAX_CLIENTS; i++) {
         s_clients[i].fd = -1;
@@ -1472,7 +1484,19 @@ esp_err_t rtsp_server_start(void)
 
     rtsp_reset_tx_stats();
 
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        rtsp_server_task, "rtsp_srv", RTSP_SERVER_TASK_STACK, NULL, 5, NULL, RTSP_SERVER_TASK_CORE);
-    return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
+    for (size_t i = 0; i < sizeof(s_rtsp_listeners) / sizeof(s_rtsp_listeners[0]); i++) {
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            rtsp_server_task,
+            s_rtsp_listeners[i].task_name,
+            RTSP_SERVER_TASK_STACK,
+            (void *)&s_rtsp_listeners[i],
+            5,
+            NULL,
+            RTSP_SERVER_TASK_CORE);
+        if (ret != pdPASS) {
+            return ESP_FAIL;
+        }
+    }
+
+    return ESP_OK;
 }

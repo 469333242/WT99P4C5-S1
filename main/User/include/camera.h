@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -23,6 +25,14 @@ extern "C" {
  * @return ESP_OK 成功
  */
 esp_err_t camera_init(void);
+
+/**
+ * @brief 控制外部请求的采集保持状态
+ *
+ * RTSP 播放和外部拍照/录像请求分别控制采集保持。该接口用于 A3 API
+ * 或网页拍照在没有 RTSP 客户端时临时拉起视频链路。
+ */
+void camera_set_external_active(bool active);
 
 #ifdef __cplusplus
 }

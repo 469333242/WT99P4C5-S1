@@ -109,6 +109,14 @@ esp_err_t media_storage_prepare_photo_buffers(uint32_t width, uint32_t height);
 esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, uint32_t fps);
 
 /**
+ * @brief 设置录像 MP4 分段间隔
+ *
+ * @param seconds 分段秒数，A3 record-param 协议当前固定使用 60 秒
+ * @return ESP_OK 成功，其它错误码表示参数非法或媒体存储未初始化
+ */
+esp_err_t media_storage_set_video_segment_seconds(uint32_t seconds);
+
+/**
  * @brief 请求拍照一次
  *
  * 该接口仅置位“待拍照”标志，真正的拍照会在摄像头任务拿到下一帧 YUV420 图像时提交给后台任务。

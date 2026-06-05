@@ -3,7 +3,7 @@
  * @brief Z-1mini 吊舱网口透传模块实现
  *
  * 拓扑：
- *   电脑 Wi-Fi 192.168.144.x <-> WT99 AP 192.168.144.1 <-> ETH <-> Z-1mini 192.168.144.108
+ *   电脑 Wi-Fi 192.168.144.x <-> WT99 AP 192.168.144.2 <-> ETH <-> Z-1mini 192.168.144.108
  *
  * ESP32-P4 使用 ESP-Hosted 远端 Wi-Fi，IDF 原生 esp_netif 二层桥只支持本机 Wi-Fi，
  * 因此这里使用 Wi-Fi AP 原始帧回调与以太网原始帧回调做定向转发。
@@ -48,7 +48,7 @@ static const char *TAG = "z1mini_bridge";
 #define Z1MINI_BRIDGE_STATS_INTERVAL_MS 2000U
 #define Z1MINI_BRIDGE_STATS_TASK_STACK  3072U
 #define Z1MINI_BRIDGE_STATS_TASK_PRIO   (tskIDLE_PRIORITY + 1)
-#define Z1MINI_BRIDGE_ETH_TO_WIFI_QUEUE_LEN 16U
+#define Z1MINI_BRIDGE_ETH_TO_WIFI_QUEUE_LEN 64U
 #define Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_STACK 4096U
 #define Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_PRIO  (tskIDLE_PRIORITY + 10)
 
@@ -549,7 +549,12 @@ static void z1mini_bridge_log_ready(const device_web_config_t *config,
     ESP_LOGI(TAG, "  热点名称:    %s", config ? config->wifi_ap_ssid : "--");
     ESP_LOGI(TAG, "  热点密码:    %s", config ? config->wifi_ap_password : "--");
     ESP_LOGI(TAG, "  WT99 网页:   http://%s/", ap_ip);
-    ESP_LOGI(TAG, "  WT99 视频:   rtsp://%s:%d/stream", ap_ip, RTSP_PORT);
+    if (RTSP_PORT == 554) {
+        ESP_LOGI(TAG, "  WT99 视频:   rtsp://%s", ap_ip);
+    } else {
+        ESP_LOGI(TAG, "  WT99 视频:   rtsp://%s:%d/stream", ap_ip, RTSP_PORT);
+    }
+    ESP_LOGI(TAG, "  WT99 热像:   rtsp://%s:%d/live/6", ap_ip, RTSP_THERMAL_PORT);
     ESP_LOGI(TAG, "  WT99 串口0:  %s:%d", ap_ip, TCP_UART0_PORT);
     ESP_LOGI(TAG, "  吊舱地址:    %s", device_ip);
     ESP_LOGI(TAG, "  吊舱视频:    rtsp://%s", device_ip);

@@ -75,7 +75,6 @@ static const char *TAG = "media_storage";
 #define MEDIA_STORAGE_VIDEO_QUEUE_LEN_SXGA    30
 #define MEDIA_STORAGE_VIDEO_WAIT_MS           200
 #define MEDIA_STORAGE_VIDEO_SEGMENT_SEC       120U
-#define MEDIA_STORAGE_VIDEO_SEGMENT_US        ((int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL)
 #define MEDIA_STORAGE_VIDEO_TIMESCALE         90000U
 #define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE    (128U * 1024U)
 #define MEDIA_STORAGE_VIDEO_FRAME_BUF_SIZE_LOW_RES (96U * 1024U)
@@ -161,6 +160,8 @@ typedef struct {
     uint32_t              video_height;
     uint32_t              video_fps;
     uint32_t              video_sample_duration;
+    uint32_t              video_segment_seconds;
+    int64_t               video_segment_us;
     uint64_t              video_avg_bytes_per_sec;
     media_mp4_writer_t    video_writer;
     uint8_t              *video_sps;
@@ -843,6 +844,16 @@ static uint32_t media_storage_base_save_interval(void)
 {
     return (MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL == 0U) ? 1U
                                                          : MEDIA_STORAGE_VIDEO_SAVE_GOP_INTERVAL;
+}
+
+static int64_t media_storage_get_video_segment_us(void)
+{
+    int64_t segment_us = 0;
+
+    portENTER_CRITICAL(&s_media_lock);
+    segment_us = s_media.video_segment_us;
+    portEXIT_CRITICAL(&s_media_lock);
+    return segment_us;
 }
 
 static uint32_t media_storage_count_video_slots_in_use_locked(void)
@@ -2182,7 +2193,8 @@ static void media_storage_handle_video_frame(const media_storage_video_frame_t *
 
         elapsed_us = esp_timer_get_time() - s_media.video_segment_start_us;
 
-        if (!s_media.video_switch_pending && elapsed_us >= MEDIA_STORAGE_VIDEO_SEGMENT_US) {
+        if (!s_media.video_switch_pending &&
+            elapsed_us >= media_storage_get_video_segment_us()) {
             s_media.video_switch_pending = true;
             ESP_LOGI(TAG, "录像分段时长已到，等待下一帧 IDR 切段");
         }
@@ -2325,6 +2337,8 @@ esp_err_t media_storage_init(void)
     }
 
     media_mp4_writer_init(&s_media.video_writer);
+    s_media.video_segment_seconds = MEDIA_STORAGE_VIDEO_SEGMENT_SEC;
+    s_media.video_segment_us = (int64_t)MEDIA_STORAGE_VIDEO_SEGMENT_SEC * 1000000LL;
     s_media.initialized = true;
     ESP_LOGI(TAG, "媒体存储模块已初始化，照片与录像链路按需创建");
     return ESP_OK;
@@ -2511,6 +2525,25 @@ esp_err_t media_storage_prepare_video_record(uint32_t width, uint32_t height, ui
     if (record_requested_before) {
         ESP_LOGI(TAG, "录像缓冲准备完成，恢复此前保留的录像请求");
     }
+    return ESP_OK;
+}
+
+esp_err_t media_storage_set_video_segment_seconds(uint32_t seconds)
+{
+    if (!s_media.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (seconds == 0U || seconds > 3600U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_media_lock);
+    s_media.video_segment_seconds = seconds;
+    s_media.video_segment_us = (int64_t)seconds * 1000000LL;
+    portEXIT_CRITICAL(&s_media_lock);
+
+    ESP_LOGI(TAG, "录像分段间隔已设置为 %" PRIu32 " 秒", seconds);
     return ESP_OK;
 }
 

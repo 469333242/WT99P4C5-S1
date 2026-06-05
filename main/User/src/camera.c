@@ -280,7 +280,10 @@ static cam_ctx_t s_cam;
 
 /* 用于控制采集任务启停的事件组 */
 static EventGroupHandle_t s_cam_event;
-#define CAM_START_BIT   BIT0    /* 置位：有客户端，开始采集 */
+static bool s_cam_external_active_requested;
+#define CAM_RTSP_START_BIT      BIT0    /* 置位：有 RTSP 客户端，开始采集 */
+#define CAM_EXTERNAL_START_BIT  BIT1    /* 置位：A3/网页请求保持采集 */
+#define CAM_ACTIVE_BITS         (CAM_RTSP_START_BIT | CAM_EXTERNAL_START_BIT)
 
 /*
  * 时间戳 OSD 总开关。
@@ -557,7 +560,7 @@ static void flush_stale_capture_buffers(void)
  * @brief RTSP 播放状态回调
  *
  * 由 RTSP 服务器在客户端数量 0↔1 变化时调用。
- * 通过事件组通知 cam_task 启动或暂停采集。
+ * 通过事件组通知 cam_task 启动或暂停采集。录像由 A3/Web API 独立控制。
  *
  * @param playing  true = 开始采集；false = 暂停采集
  */
@@ -566,13 +569,26 @@ static void on_rtsp_playing(bool playing)
     if (playing) {
         ESP_LOGI(TAG, "客户端已连接，启动摄像头采集");
         rtsp_reset_tx_stats();
-        media_storage_start_video_record();
-        xEventGroupSetBits(s_cam_event, CAM_START_BIT);
+        xEventGroupSetBits(s_cam_event, CAM_RTSP_START_BIT);
     } else {
         ESP_LOGI(TAG, "客户端已断开，暂停摄像头采集");
         rtsp_reset_tx_stats();
-        media_storage_stop_video_record();
-        xEventGroupClearBits(s_cam_event, CAM_START_BIT);
+        xEventGroupClearBits(s_cam_event, CAM_RTSP_START_BIT);
+    }
+}
+
+void camera_set_external_active(bool active)
+{
+    s_cam_external_active_requested = active;
+
+    if (!s_cam_event) {
+        return;
+    }
+
+    if (active) {
+        xEventGroupSetBits(s_cam_event, CAM_EXTERNAL_START_BIT);
+    } else {
+        xEventGroupClearBits(s_cam_event, CAM_EXTERNAL_START_BIT);
     }
 }
 
@@ -771,9 +787,9 @@ static void cam_task(void *arg)
     bool stats_window_active = false;
 
     while (1) {
-        /* 等待 RTSP 客户端连接后再采集 */
-        xEventGroupWaitBits(s_cam_event, CAM_START_BIT,
-                            pdFALSE, pdTRUE, portMAX_DELAY);
+        /* 等待 RTSP 客户端或外部拍照/录像请求后再采集 */
+        xEventGroupWaitBits(s_cam_event, CAM_ACTIVE_BITS,
+                            pdFALSE, pdFALSE, portMAX_DELAY);
         if (!stats_window_active) {
             flush_stale_capture_buffers();
             rtsp_reset_tx_stats();
@@ -876,7 +892,7 @@ static void cam_task(void *arg)
             ESP_LOGW(TAG, "H.264 编码失败，跳过此帧");
         }
 
-        if ((xEventGroupGetBits(s_cam_event) & CAM_START_BIT) == 0) {
+        if ((xEventGroupGetBits(s_cam_event) & CAM_ACTIVE_BITS) == 0) {
             stats_window_active = false;
         }
     }
@@ -924,9 +940,15 @@ esp_err_t camera_init(void)
         ESP_LOGE(TAG, "EventGroup 创建失败");
         return ESP_ERR_NO_MEM;
     }
+    if (s_cam_external_active_requested) {
+        xEventGroupSetBits(s_cam_event, CAM_EXTERNAL_START_BIT);
+    }
 
     /* 注册 RTSP 播放状态回调 */
     rtsp_set_playing_callback(on_rtsp_playing);
+    if (rtsp_get_active_client_count() > 0U) {
+        xEventGroupSetBits(s_cam_event, CAM_RTSP_START_BIT);
+    }
 
     /* 1. 初始化 esp_video（MIPI-CSI + SCCB）*/
     esp_video_init_csi_config_t csi_cfg[] = {{

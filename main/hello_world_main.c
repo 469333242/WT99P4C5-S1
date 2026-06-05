@@ -7,13 +7,13 @@
  *   - wifi_connect     : WiFi AP/STA 网络（通过 ESP32-C5 SDIO 协处理器）
  *   - z1mini_bridge    : Z-1mini 吊舱网口透传（WiFi AP <-> 以太网）
  *   - media_storage    : TF 卡媒体存储（当前已接入自动照片存储）
- *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 8554）
+ *   - rtsp_server      : RTSP/RTP 视频流服务器（端口 554，兼容 580）
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
  *   - usb_thermal_camera: USB UVC 热像仪持续采集与灰度帧转换
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
  *
  * 访问方式：
- *   视频流  : rtsp://<设备IP>:8554/stream
+ *   视频流  : rtsp://<设备IP>
  *   吊舱流  : rtsp://192.168.144.108
  *   网页    : http://<设备IP>/
  *   串口0   : TCP <设备IP>:8880
@@ -60,8 +60,8 @@
 #define ETH_STATIC_GW          "169.254.27.1"
 #define ETH_STATIC_MASK        "255.255.255.0"
 
-#define Z1MINI_BRIDGE_IP       "192.168.144.1"
-#define Z1MINI_BRIDGE_GW       "192.168.144.1"
+#define Z1MINI_BRIDGE_IP       "192.168.144.2"
+#define Z1MINI_BRIDGE_GW       "192.168.144.2"
 #define Z1MINI_BRIDGE_MASK     "255.255.255.0"
 #define Z1MINI_DEVICE_IP       "192.168.144.108"
 #define Z1MINI_RTSP_URL        "rtsp://192.168.144.108"
@@ -263,13 +263,14 @@ void app_main(void)
         ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<设备IP>/");
     }
 
-    /* 5. 启动 RTSP 服务器（端口 8554） */
+    /* 5. 启动 RTSP 服务器（默认 554，兼容热像仪地址 580/live/6） */
     err = rtsp_server_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "RTSP 服务器启动失败: 0x%x", err);
         return;
     }
-    ESP_LOGI(TAG, "RTSP 服务器已启动，访问地址: rtsp://<设备IP>:%d/stream", RTSP_PORT);
+    ESP_LOGI(TAG, "RTSP 服务器已启动，访问地址: rtsp://<设备IP> 和 rtsp://<设备IP>:%d/live/6",
+             RTSP_THERMAL_PORT);
 
     /* 6. 启动 UART0 TCP 透传服务（端口 8880） */
     /*    启动 UART1 TCP 透传服务（端口 8881） */

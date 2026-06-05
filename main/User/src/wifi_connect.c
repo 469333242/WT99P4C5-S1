@@ -214,7 +214,12 @@ static void wifi_log_ap_ready(void)
     ESP_LOGI(TAG, "  SSID:  %s", s_wifi_config.wifi_ap_ssid);
     ESP_LOGI(TAG, "  PASS:  %s", s_wifi_config.wifi_ap_password);
     ESP_LOGI(TAG, "  WEB:   http://%s/", s_wifi_config.wifi_static_ip);
-    ESP_LOGI(TAG, "  RTSP:  rtsp://%s:%d/stream", s_wifi_config.wifi_static_ip, RTSP_PORT);
+    if (RTSP_PORT == 554) {
+        ESP_LOGI(TAG, "  RTSP:  rtsp://%s", s_wifi_config.wifi_static_ip);
+    } else {
+        ESP_LOGI(TAG, "  RTSP:  rtsp://%s:%d/stream", s_wifi_config.wifi_static_ip, RTSP_PORT);
+    }
+    ESP_LOGI(TAG, "  A3热像: rtsp://%s:%d/live/6", s_wifi_config.wifi_static_ip, RTSP_THERMAL_PORT);
     ESP_LOGI(TAG, "  UART0: %s:%d", s_wifi_config.wifi_static_ip, TCP_UART0_PORT);
     ESP_LOGI(TAG, "======================================");
 }
@@ -232,7 +237,12 @@ static void wifi_log_sta_ready(const esp_netif_ip_info_t *ip_info)
     ESP_LOGI(TAG, "  GW:    " IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "  MASK:  " IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "  WEB:   http://" IPSTR "/", IP2STR(&ip_info->ip));
-    ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR ":%d/stream", IP2STR(&ip_info->ip), RTSP_PORT);
+    if (RTSP_PORT == 554) {
+        ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR, IP2STR(&ip_info->ip));
+    } else {
+        ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR ":%d/stream", IP2STR(&ip_info->ip), RTSP_PORT);
+    }
+    ESP_LOGI(TAG, "  A3热像: rtsp://" IPSTR ":%d/live/6", IP2STR(&ip_info->ip), RTSP_THERMAL_PORT);
     ESP_LOGI(TAG, "  UART0: " IPSTR ":%d", IP2STR(&ip_info->ip), TCP_UART0_PORT);
     ESP_LOGI(TAG, "======================================");
 }

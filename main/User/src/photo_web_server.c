@@ -39,6 +39,7 @@
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 
+#include "camera.h"
 #include "device_web_config.h"
 #include "media_storage.h"
 #include "photo_web_server.h"
@@ -64,6 +65,12 @@ static const char *TAG = "photo_web";
 #define PHOTO_WEB_DELETE_BODY_MAX_LEN 16384
 #define PHOTO_WEB_CONFIG_BODY_MAX_LEN 1024
 #define PHOTO_WEB_THERMAL_BODY_MAX_LEN 64
+#define PHOTO_WEB_A3_RECORD_BODY_MAX_LEN 512
+#define PHOTO_WEB_A3_SYS_TIME_TEXT_LEN 20
+#define PHOTO_WEB_A3_CAPTURE_HOLD_MS 5000U
+#define PHOTO_WEB_A3_CHANNEL 1U
+#define PHOTO_WEB_A3_FILE_SWITCH_INTERVAL 60U
+#define PHOTO_WEB_TIMEZONE "CST-8"
 #define PHOTO_WEB_STATUS_TEXT_LEN 64
 #define PHOTO_WEB_VALID_UNIX_SEC 1704067200LL
 #define PHOTO_WEB_SERVER_STACK_SIZE (8 * 1024)
@@ -84,6 +91,17 @@ typedef struct
 typedef bool (*photo_web_suffix_check_t)(const char *name);
 
 static photo_web_ctx_t s_photo_web;
+static portMUX_TYPE s_photo_web_a3_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_photo_web_a3_record_active;
+static uint32_t s_photo_web_external_hold_generation;
+
+typedef struct {
+    uint32_t channel;
+    bool record;
+    bool photograph;
+    char sys_time[PHOTO_WEB_A3_SYS_TIME_TEXT_LEN];
+    uint32_t file_switch_interval;
+} photo_web_a3_record_param_t;
 
 static esp_err_t photo_web_read_request_body(httpd_req_t *req, char **body_out);
 
@@ -755,7 +773,7 @@ static const char *s_photo_index_html_v6[] = {
     "      deviceClockTimer: 0,\n",
     "      deviceStatusTimer: 0,\n",
     "      photo: { title: '照片', unit: '张', empty: 'SD 卡中暂无照片', items: [], selected: new Set(), collapsed: false, selecting: false },\n",
-    "      video: { title: '录像', unit: '段', empty: 'TF 卡中暂无录像，RTSP 客户端播放期间会自动保存录像', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
+    "      video: { title: '录像', unit: '段', empty: 'TF 卡中暂无录像，可通过 A3 或接口启动录像', items: [], selected: new Set(), collapsed: false, selecting: false }\n",
     "    };\n",
     "    const refs = {\n",
     "      status: document.getElementById('status'),\n",
@@ -2119,6 +2137,269 @@ static esp_err_t photo_web_form_get_u32(const char *body, const char *key,
     return ESP_OK;
 }
 
+static const char *photo_web_json_find_value(const char *body, const char *key)
+{
+    char pattern[48];
+    const char *p;
+
+    if (!body || !key) {
+        return NULL;
+    }
+
+    if (snprintf(pattern, sizeof(pattern), "\"%s\"", key) < 0) {
+        return NULL;
+    }
+
+    p = strstr(body, pattern);
+    if (!p) {
+        return NULL;
+    }
+
+    p += strlen(pattern);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    if (*p != ':') {
+        return NULL;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    return p;
+}
+
+static esp_err_t photo_web_json_get_bool(const char *body, const char *key, bool *value)
+{
+    const char *p = photo_web_json_find_value(body, key);
+
+    if (!p || !value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (strncmp(p, "true", 4) == 0) {
+        *value = true;
+        return ESP_OK;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *value = false;
+        return ESP_OK;
+    }
+
+    return ESP_ERR_INVALID_ARG;
+}
+
+static esp_err_t photo_web_json_get_u32(const char *body, const char *key, uint32_t *value)
+{
+    const char *p = photo_web_json_find_value(body, key);
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!p || !value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    errno = 0;
+    parsed = strtoul(p, &end, 10);
+    if (errno != 0 || end == p || parsed > UINT32_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        end++;
+    }
+    if (*end != ',' && *end != '}') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *value = (uint32_t)parsed;
+    return ESP_OK;
+}
+
+static esp_err_t photo_web_json_get_string(const char *body,
+                                           const char *key,
+                                           char *value,
+                                           size_t value_size)
+{
+    const char *p = photo_web_json_find_value(body, key);
+    size_t len = 0;
+
+    if (!p || !value || value_size == 0U || *p != '"') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    p++;
+    while (p[len] != '\0' && p[len] != '"') {
+        if (p[len] == '\\' || (unsigned char)p[len] < 0x20U) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        len++;
+    }
+    if (p[len] != '"' || len >= value_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(value, p, len);
+    value[len] = '\0';
+    return ESP_OK;
+}
+
+static esp_err_t photo_web_parse_a3_record_param(const char *body,
+                                                 photo_web_a3_record_param_t *param)
+{
+    if (!body || !param) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(param, 0, sizeof(*param));
+    ESP_RETURN_ON_ERROR(photo_web_json_get_u32(body, "channel", &param->channel),
+                        TAG, "读取 A3 channel 失败");
+    ESP_RETURN_ON_ERROR(photo_web_json_get_bool(body, "record", &param->record),
+                        TAG, "读取 A3 record 失败");
+    ESP_RETURN_ON_ERROR(photo_web_json_get_bool(body, "photograph", &param->photograph),
+                        TAG, "读取 A3 photograph 失败");
+    ESP_RETURN_ON_ERROR(photo_web_json_get_string(body, "sys_time",
+                                                 param->sys_time,
+                                                 sizeof(param->sys_time)),
+                        TAG, "读取 A3 sys_time 失败");
+    ESP_RETURN_ON_ERROR(photo_web_json_get_u32(body, "file_switch_interval",
+                                              &param->file_switch_interval),
+                        TAG, "读取 A3 file_switch_interval 失败");
+
+    if (param->channel != PHOTO_WEB_A3_CHANNEL ||
+        param->file_switch_interval != PHOTO_WEB_A3_FILE_SWITCH_INTERVAL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t photo_web_sync_a3_time(const char *sys_time)
+{
+    struct tm tm_info = {0};
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    time_t unix_sec;
+
+    if (!sys_time ||
+        sscanf(sys_time, "%d-%d-%d-%d-%d-%d",
+               &year, &month, &day, &hour, &minute, &second) != 6) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (year < 2024 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        second < 0 || second > 59) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    setenv("TZ", PHOTO_WEB_TIMEZONE, 1);
+    tzset();
+    tm_info.tm_year = year - 1900;
+    tm_info.tm_mon = month - 1;
+    tm_info.tm_mday = day;
+    tm_info.tm_hour = hour;
+    tm_info.tm_min = minute;
+    tm_info.tm_sec = second;
+    tm_info.tm_isdst = -1;
+
+    unix_sec = mktime(&tm_info);
+    if (unix_sec < PHOTO_WEB_VALID_UNIX_SEC) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return media_storage_sync_time_from_unix_ms((int64_t)unix_sec * 1000LL);
+}
+
+static void photo_web_set_external_capture_active(bool active)
+{
+    device_web_config_t config = {0};
+
+    device_web_config_get(&config);
+    if (config.video_source == DEVICE_WEB_CONFIG_VIDEO_SOURCE_USB_THERMAL) {
+        usb_thermal_camera_set_external_active(active);
+    } else {
+        camera_set_external_active(active);
+    }
+}
+
+static bool photo_web_a3_is_record_active(void)
+{
+    bool active;
+
+    portENTER_CRITICAL(&s_photo_web_a3_lock);
+    active = s_photo_web_a3_record_active;
+    portEXIT_CRITICAL(&s_photo_web_a3_lock);
+    return active;
+}
+
+static void photo_web_external_hold_release_task(void *arg)
+{
+    uint32_t generation = (uint32_t)(uintptr_t)arg;
+    bool release = false;
+
+    vTaskDelay(pdMS_TO_TICKS(PHOTO_WEB_A3_CAPTURE_HOLD_MS));
+
+    portENTER_CRITICAL(&s_photo_web_a3_lock);
+    if (!s_photo_web_a3_record_active &&
+        s_photo_web_external_hold_generation == generation) {
+        release = true;
+    }
+    portEXIT_CRITICAL(&s_photo_web_a3_lock);
+
+    if (release) {
+        photo_web_set_external_capture_active(false);
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void photo_web_hold_external_capture_for_photo(void)
+{
+    uint32_t generation;
+
+    photo_web_set_external_capture_active(true);
+
+    portENTER_CRITICAL(&s_photo_web_a3_lock);
+    s_photo_web_external_hold_generation++;
+    if (s_photo_web_external_hold_generation == 0U) {
+        s_photo_web_external_hold_generation = 1U;
+    }
+    generation = s_photo_web_external_hold_generation;
+    portEXIT_CRITICAL(&s_photo_web_a3_lock);
+
+    if (xTaskCreate(photo_web_external_hold_release_task,
+                    "photo_hold",
+                    2048,
+                    (void *)(uintptr_t)generation,
+                    tskIDLE_PRIORITY + 1,
+                    NULL) != pdPASS) {
+        ESP_LOGW(TAG, "创建拍照采集保持释放任务失败");
+        if (!photo_web_a3_is_record_active()) {
+            photo_web_set_external_capture_active(false);
+        }
+    }
+}
+
+static void photo_web_set_a3_record_active(bool active)
+{
+    portENTER_CRITICAL(&s_photo_web_a3_lock);
+    s_photo_web_a3_record_active = active;
+    if (active) {
+        s_photo_web_external_hold_generation++;
+        if (s_photo_web_external_hold_generation == 0U) {
+            s_photo_web_external_hold_generation = 1U;
+        }
+    }
+    portEXIT_CRITICAL(&s_photo_web_a3_lock);
+
+    photo_web_set_external_capture_active(active);
+}
+
 static esp_netif_t *photo_web_get_active_netif(void)
 {
     esp_netif_t *netif = NULL;
@@ -2202,8 +2483,12 @@ static void photo_web_fill_ip_texts(char *ip_text, size_t ip_text_size,
     snprintf(ip_text, ip_text_size, IPSTR, IP2STR(&ip_info.ip));
     snprintf(gw_text, gw_text_size, IPSTR, IP2STR(&ip_info.gw));
     snprintf(mask_text, mask_text_size, IPSTR, IP2STR(&ip_info.netmask));
-    snprintf(rtsp_url, rtsp_url_size, "rtsp://" IPSTR ":%d/stream",
-             IP2STR(&ip_info.ip), RTSP_PORT);
+    if (RTSP_PORT == 554) {
+        snprintf(rtsp_url, rtsp_url_size, "rtsp://" IPSTR, IP2STR(&ip_info.ip));
+    } else {
+        snprintf(rtsp_url, rtsp_url_size, "rtsp://" IPSTR ":%d/stream",
+                 IP2STR(&ip_info.ip), RTSP_PORT);
+    }
     snprintf(web_url, web_url_size, "http://" IPSTR "/", IP2STR(&ip_info.ip));
     snprintf(tcp_uart0_url, tcp_uart0_url_size, IPSTR ":%d",
              IP2STR(&ip_info.ip), TCP_UART0_PORT);
@@ -3072,6 +3357,164 @@ static esp_err_t photo_web_api_reboot_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t photo_web_api_a3_sdcard_param_handler(httpd_req_t *req)
+{
+    media_storage_tf_status_t status = {0};
+    char resp[1536] = {0};
+    int resp_len;
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = media_storage_get_tf_status(false, &status);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "A3 读取 SD 卡状态失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "读取 SD 卡状态失败");
+    }
+
+    resp_len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"mounted\":%s,\"card_ok\":%s,\"tf_full\":%s"
+                        ",\"can_capture\":%s,\"can_record\":%s"
+                        ",\"total_bytes\":%" PRIu64 ",\"free_bytes\":%" PRIu64
+                        ",\"used_bytes\":%" PRIu64 ",\"est_record_seconds\":%" PRIu32
+                        ",\"est_photo_count\":%" PRIu32 ",\"status\":\"%s\"}",
+                        status.tf_mounted ? "true" : "false",
+                        status.tf_card_ok ? "true" : "false",
+                        status.tf_full ? "true" : "false",
+                        status.tf_can_capture ? "true" : "false",
+                        status.tf_can_start_record ? "true" : "false",
+                        status.tf_total_bytes,
+                        status.tf_free_bytes,
+                        status.tf_used_bytes,
+                        status.tf_est_record_seconds,
+                        status.tf_est_photo_count,
+                        status.tf_status_text);
+    if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    return httpd_resp_send(req, resp, resp_len);
+}
+
+static esp_err_t photo_web_api_a3_record_param_handler(httpd_req_t *req)
+{
+    char *body = NULL;
+    photo_web_a3_record_param_t param = {0};
+    media_storage_tf_status_t tf_status = {0};
+    char resp[192] = {0};
+    int resp_len;
+    esp_err_t ret;
+
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (req->content_len > PHOTO_WEB_A3_RECORD_BODY_MAX_LEN) {
+        return photo_web_send_json_error(req, "413 Payload Too Large", "A3 录像参数请求过大");
+    }
+
+    ret = photo_web_read_request_body(req, &body);
+    if (ret == ESP_ERR_INVALID_ARG) {
+        return photo_web_send_json_error(req, "400 Bad Request", "A3 录像参数请求为空");
+    }
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        return photo_web_send_json_error(req, "413 Payload Too Large", "A3 录像参数请求过大");
+    }
+    if (ret == ESP_ERR_NO_MEM) {
+        return photo_web_send_json_error(req, "500 Internal Server Error", "内存不足");
+    }
+    if (ret != ESP_OK) {
+        return photo_web_send_json_error(req, "400 Bad Request", "A3 录像参数请求读取失败");
+    }
+
+    ret = photo_web_parse_a3_record_param(body, &param);
+    free(body);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "A3 record-param 参数非法");
+        return photo_web_send_json_error(req, "400 Bad Request", "A3 录像参数非法");
+    }
+
+    ret = photo_web_sync_a3_time(param.sys_time);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "A3 时间同步失败 | sys_time=%s | ret=0x%x (%s)",
+                 param.sys_time, ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "400 Bad Request", "A3 时间参数非法");
+    }
+
+    ret = media_storage_set_video_segment_seconds(param.file_switch_interval);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "A3 设置录像分段间隔失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+        return photo_web_send_json_error(req, "500 Internal Server Error", "设置录像分段间隔失败");
+    }
+
+    ret = media_storage_get_tf_status(false, &tf_status);
+    if (ret != ESP_OK) {
+        return photo_web_send_json_error(req, "500 Internal Server Error", "读取 SD 卡状态失败");
+    }
+
+    if (param.record && !tf_status.tf_can_start_record) {
+        return photo_web_send_json_error(req, "409 Conflict", "SD 卡剩余空间不足，无法启动录像");
+    }
+    if (param.photograph && !tf_status.tf_can_capture) {
+        return photo_web_send_json_error(req, "409 Conflict", "SD 卡剩余空间不足，无法拍照");
+    }
+
+    if (param.record) {
+        photo_web_set_a3_record_active(true);
+        media_storage_start_video_record();
+    } else {
+        media_storage_stop_video_record();
+        photo_web_set_a3_record_active(false);
+    }
+
+    if (param.photograph) {
+        ret = media_storage_request_photo();
+        if (ret != ESP_OK) {
+            if (!param.record) {
+                photo_web_set_a3_record_active(false);
+            }
+
+            if (ret == ESP_ERR_MEDIA_STORAGE_TF_FULL) {
+                return photo_web_send_json_error(req, "409 Conflict", "SD 卡剩余空间不足，无法拍照");
+            }
+            if (ret == ESP_ERR_INVALID_STATE) {
+                return photo_web_send_json_error(req, "409 Conflict", "当前已有拍照任务正在处理中");
+            }
+            if (ret == ESP_ERR_NO_MEM) {
+                return photo_web_send_json_error(req, "500 Internal Server Error", "拍照后台任务初始化失败");
+            }
+
+            ESP_LOGW(TAG, "A3 拍照请求提交失败: 0x%x (%s)", ret, esp_err_to_name(ret));
+            return photo_web_send_json_error(req, "500 Internal Server Error", "拍照请求提交失败");
+        }
+
+        if (!param.record) {
+            photo_web_hold_external_capture_for_photo();
+        }
+    }
+
+    resp_len = snprintf(resp, sizeof(resp),
+                        "{\"ok\":true,\"channel\":%" PRIu32 ",\"record\":%s"
+                        ",\"photograph\":%s,\"file_switch_interval\":%" PRIu32 "}",
+                        param.channel,
+                        param.record ? "true" : "false",
+                        param.photograph ? "true" : "false",
+                        param.file_switch_interval);
+    if (resp_len < 0 || resp_len >= (int)sizeof(resp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    ESP_LOGI(TAG, "A3 record-param 已处理 | record=%d | photograph=%d | sys_time=%s",
+             param.record, param.photograph, param.sys_time);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    photo_web_set_no_cache(req);
+    return httpd_resp_send(req, resp, resp_len);
+}
+
 static esp_err_t photo_web_api_capture_handler(httpd_req_t *req)
 {
     esp_err_t ret;
@@ -3086,13 +3529,10 @@ static esp_err_t photo_web_api_capture_handler(httpd_req_t *req)
         return photo_web_send_json_error(req, "503 Service Unavailable", "TF 卡未挂载");
     }
 
-    if (rtsp_get_active_client_count() == 0U)
-    {
-        return photo_web_send_json_error(req, "409 Conflict", "当前未在推流，无法拍照");
-    }
     ret = media_storage_request_photo();
     if (ret == ESP_OK)
     {
+        photo_web_hold_external_capture_for_photo();
         httpd_resp_set_type(req, "application/json; charset=utf-8");
         photo_web_set_no_cache(req);
         ESP_LOGI(TAG, "网页拍照请求已受理");
@@ -3662,7 +4102,7 @@ esp_err_t photo_web_server_start(void)
     config.server_port = PHOTO_WEB_SERVER_PORT;
     config.stack_size = PHOTO_WEB_SERVER_STACK_SIZE;
     config.max_open_sockets = 6;
-    config.max_uri_handlers = 19;
+    config.max_uri_handlers = 21;
     config.backlog_conn = 4;
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -3726,6 +4166,18 @@ esp_err_t photo_web_server_start(void)
         .uri = "/api/capture",
         .method = HTTP_POST,
         .handler = photo_web_api_capture_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_a3_record_param_uri = {
+        .uri = "/api/a3/record-param",
+        .method = HTTP_POST,
+        .handler = photo_web_api_a3_record_param_handler,
+        .user_ctx = NULL,
+    };
+    const httpd_uri_t api_a3_sdcard_param_uri = {
+        .uri = "/api/a3/sdcard-param",
+        .method = HTTP_GET,
+        .handler = photo_web_api_a3_sdcard_param_handler,
         .user_ctx = NULL,
     };
     const httpd_uri_t api_delete_uri = {
@@ -3821,6 +4273,14 @@ esp_err_t photo_web_server_start(void)
     if (ret == ESP_OK)
     {
         ret = httpd_register_uri_handler(s_photo_web.server, &api_capture_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_a3_record_param_uri);
+    }
+    if (ret == ESP_OK)
+    {
+        ret = httpd_register_uri_handler(s_photo_web.server, &api_a3_sdcard_param_uri);
     }
     if (ret == ESP_OK)
     {

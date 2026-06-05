@@ -15,6 +15,7 @@
 #include "esp_netif.h"
 #include "esp_log.h"
 #include "eth_connect.h"
+#include "rtsp_server.h"
 
 static const char *TAG = "eth_connect";
 
@@ -71,8 +72,14 @@ static void eth_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "======================================");
         ESP_LOGI(TAG, "  以太网IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR ":8554/stream",
-                 IP2STR(&event->ip_info.ip));
+        if (RTSP_PORT == 554) {
+            ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR, IP2STR(&event->ip_info.ip));
+        } else {
+            ESP_LOGI(TAG, "  RTSP:  rtsp://" IPSTR ":%d/stream",
+                     IP2STR(&event->ip_info.ip), RTSP_PORT);
+        }
+        ESP_LOGI(TAG, "  A3热像: rtsp://" IPSTR ":%d/live/6",
+                 IP2STR(&event->ip_info.ip), RTSP_THERMAL_PORT);
         ESP_LOGI(TAG, "======================================");
         if (s_eth_event_group) {
             xEventGroupSetBits(s_eth_event_group, ETH_GOT_IP_BIT);

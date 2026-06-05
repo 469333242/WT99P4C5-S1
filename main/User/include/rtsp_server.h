@@ -3,7 +3,7 @@
  * @brief RTSP/RTP 视频流服务器头文件（H.264 编码）
  *
  * 实现基于 TCP 的 RTSP 服务器，将 H.264 帧通过 RTP 推送给客户端。
- * 访问地址：rtsp://<设备IP>:8554/stream
+ * 访问地址：rtsp://<设备IP>
  */
 
 #pragma once
@@ -19,7 +19,8 @@ extern "C" {
 #endif
 
 /* RTSP 服务监听端口 */
-#define RTSP_PORT 8554
+#define RTSP_PORT 554
+#define RTSP_THERMAL_PORT 580
 
 /**
  * @brief 启动 RTSP 服务器任务
