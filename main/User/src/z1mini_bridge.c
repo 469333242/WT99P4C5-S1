@@ -15,6 +15,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "dhcpserver/dhcpserver.h"
@@ -43,19 +44,433 @@ static const char *TAG = "z1mini_bridge";
 #define Z1MINI_BRIDGE_ETH_MAX_FRAME   1536U
 #define Z1MINI_BRIDGE_DHCP_START_IP   "192.168.144.20"
 #define Z1MINI_BRIDGE_DHCP_END_IP     "192.168.144.60"
+#define Z1MINI_BRIDGE_STATS_ENABLE    0 //调试信息
+#define Z1MINI_BRIDGE_STATS_INTERVAL_MS 2000U
+#define Z1MINI_BRIDGE_STATS_TASK_STACK  3072U
+#define Z1MINI_BRIDGE_STATS_TASK_PRIO   (tskIDLE_PRIORITY + 1)
+#define Z1MINI_BRIDGE_ETH_TO_WIFI_QUEUE_LEN 64U
+#define Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_STACK 4096U
+#define Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_PRIO  (tskIDLE_PRIORITY + 10)
+
+#define Z1MINI_BRIDGE_ETH_TYPE_IPV4 0x0800U
+#define Z1MINI_BRIDGE_ETH_TYPE_VLAN 0x8100U
+#define Z1MINI_BRIDGE_IP_PROTO_TCP  6U
+#define Z1MINI_BRIDGE_IP_PROTO_UDP  17U
+#define Z1MINI_BRIDGE_UDP_BIG_LEN   1000U
+#define Z1MINI_BRIDGE_RTP_V2_MASK   0xC0U
+#define Z1MINI_BRIDGE_RTP_V2_VALUE  0x80U
+#define Z1MINI_BRIDGE_RTCP_TYPE_MIN 192U
+#define Z1MINI_BRIDGE_RTCP_TYPE_MAX 223U
 
 static esp_netif_t *s_wifi_netif;
 static esp_eth_handle_t s_eth_handle;
 static EventGroupHandle_t s_bridge_event_group;
 static esp_netif_ip_info_t s_ap_ip_info;
 static volatile uint32_t s_ap_client_count;
+#if Z1MINI_BRIDGE_STATS_ENABLE
 static volatile uint32_t s_wifi_to_eth_count;
 static volatile uint32_t s_eth_to_wifi_count;
+static volatile uint32_t s_wifi_to_eth_total_count;
+static volatile uint32_t s_wifi_to_eth_fail_count;
+static volatile uint32_t s_wifi_to_eth_no_mem_count;
+static volatile uint32_t s_wifi_to_eth_invalid_count;
+static volatile esp_err_t s_wifi_to_eth_last_err;
+static volatile uint32_t s_eth_to_wifi_total_count;
+static volatile uint32_t s_eth_to_wifi_ip_count;
+static volatile uint32_t s_eth_to_wifi_tcp_count;
+static volatile uint32_t s_eth_to_wifi_udp_count;
+static volatile uint32_t s_eth_to_wifi_udp_big_count;
+static volatile uint32_t s_eth_to_wifi_rtp_like_count;
+static volatile uint32_t s_eth_to_wifi_rtp_gap_events;
+static volatile uint32_t s_eth_to_wifi_rtp_gap_packets;
+static volatile uint32_t s_eth_to_wifi_rtp_out_of_order_count;
+static volatile uint32_t s_eth_to_wifi_rtp_seq_reset_count;
+static volatile uint32_t s_eth_to_wifi_rtp_last_seq;
+static volatile uint32_t s_eth_to_wifi_rtp_ssrc;
+static volatile uint32_t s_eth_to_wifi_queued_count;
+static volatile uint32_t s_eth_to_wifi_queue_full_count;
+static volatile uint32_t s_eth_to_wifi_queue_max_depth;
+static volatile uint32_t s_eth_to_wifi_fail_count;
+static volatile uint32_t s_eth_to_wifi_no_mem_count;
+static volatile uint32_t s_eth_to_wifi_invalid_count;
+static volatile esp_err_t s_eth_to_wifi_last_err;
+static volatile uint32_t s_eth_to_wifi_max_len;
+#endif
+static QueueHandle_t s_eth_to_wifi_queue;
+static TaskHandle_t s_eth_to_wifi_task_handle;
+#if Z1MINI_BRIDGE_STATS_ENABLE
+static TaskHandle_t s_stats_task_handle;
+static volatile bool s_eth_to_wifi_rtp_seq_valid;
+#endif
 static bool s_wifi_rx_registered;
 static bool s_bridge_running;
 static bool s_eth_link_up;
 
 static esp_err_t z1mini_bridge_configure_dhcp_pool(esp_netif_t *netif);
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+typedef struct {
+    bool ipv4;
+    bool tcp;
+    bool udp;
+    bool udp_big;
+    bool rtp_like;
+    uint16_t rtp_seq;
+    uint32_t rtp_ssrc;
+} z1mini_bridge_frame_info_t;
+#endif
+
+typedef struct {
+    uint8_t *buffer;
+    uint16_t len;
+} z1mini_bridge_eth_frame_t;
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+static uint16_t z1mini_bridge_read_be16(const uint8_t *p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+
+static uint32_t z1mini_bridge_read_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) |
+           ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) |
+           (uint32_t)p[3];
+}
+
+static bool z1mini_bridge_udp_payload_is_rtp(const uint8_t *payload, uint16_t payload_len)
+{
+    uint8_t payload_type;
+
+    if (!payload || payload_len < 12U) {
+        return false;
+    }
+
+    if ((payload[0] & Z1MINI_BRIDGE_RTP_V2_MASK) != Z1MINI_BRIDGE_RTP_V2_VALUE) {
+        return false;
+    }
+
+    payload_type = payload[1];
+    if (payload_type >= Z1MINI_BRIDGE_RTCP_TYPE_MIN &&
+        payload_type <= Z1MINI_BRIDGE_RTCP_TYPE_MAX) {
+        return false;
+    }
+
+    return true;
+}
+
+static void z1mini_bridge_parse_frame_info(const uint8_t *frame, size_t len,
+                                           z1mini_bridge_frame_info_t *info)
+{
+    size_t ip_offset = Z1MINI_BRIDGE_ETH_HEADER_LEN;
+    uint16_t eth_type;
+    uint8_t ihl;
+    uint16_t total_len;
+    const uint8_t *ip;
+
+    if (!info) {
+        return;
+    }
+
+    memset(info, 0, sizeof(*info));
+    if (!frame || len < (Z1MINI_BRIDGE_ETH_HEADER_LEN + 20U)) {
+        return;
+    }
+
+    eth_type = z1mini_bridge_read_be16(frame + 12U);
+    if (eth_type == Z1MINI_BRIDGE_ETH_TYPE_VLAN) {
+        if (len < (Z1MINI_BRIDGE_ETH_HEADER_LEN + 4U + 20U)) {
+            return;
+        }
+        eth_type = z1mini_bridge_read_be16(frame + 16U);
+        ip_offset += 4U;
+    }
+
+    if (eth_type != Z1MINI_BRIDGE_ETH_TYPE_IPV4) {
+        return;
+    }
+
+    ip = frame + ip_offset;
+    if ((ip[0] >> 4) != 4U) {
+        return;
+    }
+
+    ihl = (uint8_t)((ip[0] & 0x0FU) * 4U);
+    if (ihl < 20U || len < (ip_offset + ihl)) {
+        return;
+    }
+
+    total_len = z1mini_bridge_read_be16(ip + 2U);
+    if (total_len < ihl || len < (ip_offset + total_len)) {
+        return;
+    }
+
+    info->ipv4 = true;
+    if (ip[9] == Z1MINI_BRIDGE_IP_PROTO_TCP) {
+        info->tcp = true;
+    } else if (ip[9] == Z1MINI_BRIDGE_IP_PROTO_UDP) {
+        const uint8_t *udp = ip + ihl;
+        const uint8_t *udp_payload;
+        uint16_t udp_len;
+        uint16_t udp_payload_len;
+
+        info->udp = true;
+        if (total_len < (ihl + 8U)) {
+            return;
+        }
+
+        udp_len = z1mini_bridge_read_be16(udp + 4U);
+        if (udp_len < 8U || udp_len > (total_len - ihl)) {
+            return;
+        }
+
+        if (udp_len >= Z1MINI_BRIDGE_UDP_BIG_LEN) {
+            info->udp_big = true;
+        }
+
+        udp_payload = udp + 8U;
+        udp_payload_len = (uint16_t)(udp_len - 8U);
+        if (z1mini_bridge_udp_payload_is_rtp(udp_payload, udp_payload_len)) {
+            info->rtp_like = true;
+            info->rtp_seq = z1mini_bridge_read_be16(udp_payload + 2U);
+            info->rtp_ssrc = z1mini_bridge_read_be32(udp_payload + 8U);
+        }
+    }
+}
+
+static void z1mini_bridge_update_rtp_sequence_stats(const z1mini_bridge_frame_info_t *info)
+{
+    uint16_t seq;
+    uint16_t expected_seq;
+    uint16_t gap;
+
+    if (!info || !info->rtp_like) {
+        return;
+    }
+
+    seq = info->rtp_seq;
+    if (!s_eth_to_wifi_rtp_seq_valid ||
+        s_eth_to_wifi_rtp_ssrc != info->rtp_ssrc) {
+        s_eth_to_wifi_rtp_ssrc = info->rtp_ssrc;
+        s_eth_to_wifi_rtp_last_seq = seq;
+        s_eth_to_wifi_rtp_seq_valid = true;
+        s_eth_to_wifi_rtp_seq_reset_count++;
+        return;
+    }
+
+    expected_seq = (uint16_t)((uint16_t)s_eth_to_wifi_rtp_last_seq + 1U);
+    if (seq == expected_seq) {
+        s_eth_to_wifi_rtp_last_seq = seq;
+        return;
+    }
+
+    gap = (uint16_t)(seq - expected_seq);
+    if (gap < 0x8000U) {
+        s_eth_to_wifi_rtp_gap_events++;
+        s_eth_to_wifi_rtp_gap_packets += (uint32_t)gap;
+        s_eth_to_wifi_rtp_last_seq = seq;
+    } else {
+        s_eth_to_wifi_rtp_out_of_order_count++;
+    }
+}
+
+static void z1mini_bridge_update_eth_to_wifi_frame_stats(const uint8_t *frame, size_t len)
+{
+    z1mini_bridge_frame_info_t info;
+
+    s_eth_to_wifi_total_count++;
+    if (len > s_eth_to_wifi_max_len) {
+        s_eth_to_wifi_max_len = (uint32_t)len;
+    }
+
+    z1mini_bridge_parse_frame_info(frame, len, &info);
+    if (info.ipv4) {
+        s_eth_to_wifi_ip_count++;
+    }
+    if (info.tcp) {
+        s_eth_to_wifi_tcp_count++;
+    }
+    if (info.udp) {
+        s_eth_to_wifi_udp_count++;
+    }
+    if (info.udp_big) {
+        s_eth_to_wifi_udp_big_count++;
+    }
+    if (info.rtp_like) {
+        s_eth_to_wifi_rtp_like_count++;
+        z1mini_bridge_update_rtp_sequence_stats(&info);
+    }
+}
+#endif
+
+static void z1mini_bridge_eth_to_wifi_task(void *arg)
+{
+    z1mini_bridge_eth_frame_t frame;
+
+    (void)arg;
+
+    while (1) {
+        if (xQueueReceive(s_eth_to_wifi_queue, &frame, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (frame.buffer && frame.len > 0U) {
+            esp_err_t tx_ret = esp_wifi_internal_tx(WIFI_IF_AP, frame.buffer, frame.len);
+#if Z1MINI_BRIDGE_STATS_ENABLE
+            if (tx_ret == ESP_OK) {
+                s_eth_to_wifi_count++;
+                s_eth_to_wifi_last_err = ESP_OK;
+            } else {
+                s_eth_to_wifi_fail_count++;
+                s_eth_to_wifi_last_err = tx_ret;
+            }
+#else
+            (void)tx_ret;
+#endif
+        }
+
+        free(frame.buffer);
+    }
+}
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+static void z1mini_bridge_stats_task(void *arg)
+{
+    uint32_t last_w2e_ok = 0;
+    uint32_t last_w2e_total = 0;
+    uint32_t last_w2e_fail = 0;
+    uint32_t last_w2e_no_mem = 0;
+    uint32_t last_w2e_invalid = 0;
+    uint32_t last_e2w_ok = 0;
+    uint32_t last_e2w_total = 0;
+    uint32_t last_e2w_ip = 0;
+    uint32_t last_e2w_tcp = 0;
+    uint32_t last_e2w_udp = 0;
+    uint32_t last_e2w_udp_big = 0;
+    uint32_t last_e2w_rtp_like = 0;
+    uint32_t last_e2w_rtp_gap_events = 0;
+    uint32_t last_e2w_rtp_gap_packets = 0;
+    uint32_t last_e2w_rtp_out_of_order = 0;
+    uint32_t last_e2w_rtp_seq_reset = 0;
+    uint32_t last_e2w_queued = 0;
+    uint32_t last_e2w_queue_full = 0;
+    uint32_t last_e2w_fail = 0;
+    uint32_t last_e2w_no_mem = 0;
+    uint32_t last_e2w_invalid = 0;
+
+    (void)arg;
+
+    while (1) {
+        uint32_t w2e_ok;
+        uint32_t w2e_total;
+        uint32_t w2e_fail;
+        uint32_t w2e_no_mem;
+        uint32_t w2e_invalid;
+        uint32_t e2w_ok;
+        uint32_t e2w_total;
+        uint32_t e2w_ip;
+        uint32_t e2w_tcp;
+        uint32_t e2w_udp;
+        uint32_t e2w_udp_big;
+        uint32_t e2w_rtp_like;
+        uint32_t e2w_rtp_gap_events;
+        uint32_t e2w_rtp_gap_packets;
+        uint32_t e2w_rtp_out_of_order;
+        uint32_t e2w_rtp_seq_reset;
+        uint32_t e2w_queued;
+        uint32_t e2w_queue_full;
+        uint32_t e2w_fail;
+        uint32_t e2w_no_mem;
+        uint32_t e2w_invalid;
+        UBaseType_t e2w_queue_depth = 0;
+
+        vTaskDelay(pdMS_TO_TICKS(Z1MINI_BRIDGE_STATS_INTERVAL_MS));
+
+        w2e_ok = s_wifi_to_eth_count;
+        w2e_total = s_wifi_to_eth_total_count;
+        w2e_fail = s_wifi_to_eth_fail_count;
+        w2e_no_mem = s_wifi_to_eth_no_mem_count;
+        w2e_invalid = s_wifi_to_eth_invalid_count;
+        e2w_ok = s_eth_to_wifi_count;
+        e2w_total = s_eth_to_wifi_total_count;
+        e2w_ip = s_eth_to_wifi_ip_count;
+        e2w_tcp = s_eth_to_wifi_tcp_count;
+        e2w_udp = s_eth_to_wifi_udp_count;
+        e2w_udp_big = s_eth_to_wifi_udp_big_count;
+        e2w_rtp_like = s_eth_to_wifi_rtp_like_count;
+        e2w_rtp_gap_events = s_eth_to_wifi_rtp_gap_events;
+        e2w_rtp_gap_packets = s_eth_to_wifi_rtp_gap_packets;
+        e2w_rtp_out_of_order = s_eth_to_wifi_rtp_out_of_order_count;
+        e2w_rtp_seq_reset = s_eth_to_wifi_rtp_seq_reset_count;
+        e2w_queued = s_eth_to_wifi_queued_count;
+        e2w_queue_full = s_eth_to_wifi_queue_full_count;
+        e2w_fail = s_eth_to_wifi_fail_count;
+        e2w_no_mem = s_eth_to_wifi_no_mem_count;
+        e2w_invalid = s_eth_to_wifi_invalid_count;
+        if (s_eth_to_wifi_queue) {
+            e2w_queue_depth = uxQueueMessagesWaiting(s_eth_to_wifi_queue);
+        }
+
+        ESP_LOGI(TAG,
+                 "透传统计 | WiFi->ETH ok=%" PRIu32 "/%" PRIu32 " fail=%" PRIu32 " no_mem=%" PRIu32 " invalid=%" PRIu32 " last_err=0x%x | "
+                 "ETH->WiFi ok=%" PRIu32 "/%" PRIu32 " ip=%" PRIu32 " tcp=%" PRIu32 " udp=%" PRIu32 " udp_big=%" PRIu32 " rtp_like=%" PRIu32
+                 " rtp_gap=%" PRIu32 "/%" PRIu32 " rtp_ooo=%" PRIu32 " rtp_reset=%" PRIu32 " rtp_seq=%" PRIu32 " rtp_ssrc=%08" PRIx32
+                 " queued=%" PRIu32 " q_full=%" PRIu32 " q_depth=%u q_max=%" PRIu32
+                 " fail=%" PRIu32 " no_mem=%" PRIu32 " invalid=%" PRIu32 " last_err=0x%x max_len=%" PRIu32,
+                 w2e_ok - last_w2e_ok,
+                 w2e_total - last_w2e_total,
+                 w2e_fail - last_w2e_fail,
+                 w2e_no_mem - last_w2e_no_mem,
+                 w2e_invalid - last_w2e_invalid,
+                 (unsigned)s_wifi_to_eth_last_err,
+                 e2w_ok - last_e2w_ok,
+                 e2w_total - last_e2w_total,
+                 e2w_ip - last_e2w_ip,
+                 e2w_tcp - last_e2w_tcp,
+                 e2w_udp - last_e2w_udp,
+                 e2w_udp_big - last_e2w_udp_big,
+                 e2w_rtp_like - last_e2w_rtp_like,
+                 e2w_rtp_gap_events - last_e2w_rtp_gap_events,
+                 e2w_rtp_gap_packets - last_e2w_rtp_gap_packets,
+                 e2w_rtp_out_of_order - last_e2w_rtp_out_of_order,
+                 e2w_rtp_seq_reset - last_e2w_rtp_seq_reset,
+                 s_eth_to_wifi_rtp_last_seq,
+                 s_eth_to_wifi_rtp_ssrc,
+                 e2w_queued - last_e2w_queued,
+                 e2w_queue_full - last_e2w_queue_full,
+                 (unsigned)e2w_queue_depth,
+                 s_eth_to_wifi_queue_max_depth,
+                 e2w_fail - last_e2w_fail,
+                 e2w_no_mem - last_e2w_no_mem,
+                 e2w_invalid - last_e2w_invalid,
+                 (unsigned)s_eth_to_wifi_last_err,
+                 s_eth_to_wifi_max_len);
+
+        last_w2e_ok = w2e_ok;
+        last_w2e_total = w2e_total;
+        last_w2e_fail = w2e_fail;
+        last_w2e_no_mem = w2e_no_mem;
+        last_w2e_invalid = w2e_invalid;
+        last_e2w_ok = e2w_ok;
+        last_e2w_total = e2w_total;
+        last_e2w_ip = e2w_ip;
+        last_e2w_tcp = e2w_tcp;
+        last_e2w_udp = e2w_udp;
+        last_e2w_udp_big = e2w_udp_big;
+        last_e2w_rtp_like = e2w_rtp_like;
+        last_e2w_rtp_gap_events = e2w_rtp_gap_events;
+        last_e2w_rtp_gap_packets = e2w_rtp_gap_packets;
+        last_e2w_rtp_out_of_order = e2w_rtp_out_of_order;
+        last_e2w_rtp_seq_reset = e2w_rtp_seq_reset;
+        last_e2w_queued = e2w_queued;
+        last_e2w_queue_full = e2w_queue_full;
+        last_e2w_fail = e2w_fail;
+        last_e2w_no_mem = e2w_no_mem;
+        last_e2w_invalid = e2w_invalid;
+    }
+}
+#endif
 
 static esp_err_t z1mini_bridge_fill_ip_info(esp_netif_ip_info_t *ip_info,
                                             const char *ip, const char *gw,
@@ -152,16 +567,40 @@ static esp_err_t z1mini_bridge_wifi_rx(void *buffer, uint16_t len, void *eb)
     void *eth_buffer;
     size_t eth_len;
 
+    if (buffer == NULL || !z1mini_bridge_is_valid_eth_frame(len)) {
+#if Z1MINI_BRIDGE_STATS_ENABLE
+        s_wifi_to_eth_invalid_count++;
+#endif
+        return esp_netif_receive(s_wifi_netif, buffer, len, eb);
+    }
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+    s_wifi_to_eth_total_count++;
+#endif
     if (buffer != NULL && z1mini_bridge_is_valid_eth_frame(len) &&
         s_eth_handle != NULL && s_eth_link_up) {
         eth_len = (len < Z1MINI_BRIDGE_ETH_MIN_TX_LEN) ? Z1MINI_BRIDGE_ETH_MIN_TX_LEN : len;
         eth_buffer = calloc(1, eth_len);
         if (eth_buffer != NULL) {
             memcpy(eth_buffer, buffer, len);
-            if (esp_eth_transmit(s_eth_handle, eth_buffer, eth_len) == ESP_OK) {
+            esp_err_t tx_ret = esp_eth_transmit(s_eth_handle, eth_buffer, eth_len);
+#if Z1MINI_BRIDGE_STATS_ENABLE
+            if (tx_ret == ESP_OK) {
                 s_wifi_to_eth_count++;
+                s_wifi_to_eth_last_err = ESP_OK;
+            } else {
+                s_wifi_to_eth_fail_count++;
+                s_wifi_to_eth_last_err = tx_ret;
             }
+#else
+            (void)tx_ret;
+#endif
             free(eth_buffer);
+        } else {
+#if Z1MINI_BRIDGE_STATS_ENABLE
+            s_wifi_to_eth_no_mem_count++;
+            s_wifi_to_eth_last_err = ESP_ERR_NO_MEM;
+#endif
         }
     }
 
@@ -189,23 +628,50 @@ static esp_err_t z1mini_bridge_register_wifi_rx_cb(void)
 static esp_err_t z1mini_bridge_eth_rx(esp_eth_handle_t eth_handle, uint8_t *buffer,
                                       uint32_t len, void *priv)
 {
-    void *wifi_buffer;
     esp_err_t ret = ESP_OK;
+    z1mini_bridge_eth_frame_t frame = {0};
 
     (void)eth_handle;
     (void)priv;
 
     if (buffer != NULL && z1mini_bridge_is_valid_eth_frame(len)) {
-        wifi_buffer = malloc(len);
-        if (wifi_buffer != NULL) {
-            memcpy(wifi_buffer, buffer, len);
-            if (esp_wifi_internal_tx(WIFI_IF_AP, wifi_buffer, (uint16_t)len) == ESP_OK) {
-                s_eth_to_wifi_count++;
+#if Z1MINI_BRIDGE_STATS_ENABLE
+        z1mini_bridge_update_eth_to_wifi_frame_stats((const uint8_t *)buffer, len);
+#endif
+
+        if (s_eth_to_wifi_queue) {
+            frame.buffer = buffer;
+            frame.len = (uint16_t)len;
+
+            if (xQueueSend(s_eth_to_wifi_queue, &frame, 0) == pdTRUE) {
+#if Z1MINI_BRIDGE_STATS_ENABLE
+                UBaseType_t depth;
+
+                s_eth_to_wifi_queued_count++;
+                depth = uxQueueMessagesWaiting(s_eth_to_wifi_queue);
+                if (depth > s_eth_to_wifi_queue_max_depth) {
+                    s_eth_to_wifi_queue_max_depth = (uint32_t)depth;
+                }
+#endif
+                return ESP_OK;
             }
-            free(wifi_buffer);
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+            s_eth_to_wifi_queue_full_count++;
+            s_eth_to_wifi_last_err = ESP_ERR_TIMEOUT;
+#endif
+            ret = ESP_ERR_TIMEOUT;
         } else {
-            ret = ESP_ERR_NO_MEM;
+#if Z1MINI_BRIDGE_STATS_ENABLE
+            s_eth_to_wifi_fail_count++;
+            s_eth_to_wifi_last_err = ESP_ERR_INVALID_STATE;
+#endif
+            ret = ESP_ERR_INVALID_STATE;
         }
+    } else {
+#if Z1MINI_BRIDGE_STATS_ENABLE
+        s_eth_to_wifi_invalid_count++;
+#endif
     }
 
     free(buffer);
@@ -371,6 +837,25 @@ static esp_err_t z1mini_bridge_start_ports(void)
 {
     bool promiscuous = true;
     esp_err_t ret;
+    BaseType_t task_ret;
+
+    if (!s_eth_to_wifi_queue) {
+        s_eth_to_wifi_queue = xQueueCreate(Z1MINI_BRIDGE_ETH_TO_WIFI_QUEUE_LEN,
+                                           sizeof(z1mini_bridge_eth_frame_t));
+        ESP_RETURN_ON_FALSE(s_eth_to_wifi_queue != NULL, ESP_ERR_NO_MEM,
+                            TAG, "创建 ETH->WiFi 转发队列失败");
+    }
+
+    if (!s_eth_to_wifi_task_handle) {
+        task_ret = xTaskCreate(z1mini_bridge_eth_to_wifi_task,
+                               "z1_e2w_tx",
+                               Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_STACK,
+                               NULL,
+                               Z1MINI_BRIDGE_ETH_TO_WIFI_TASK_PRIO,
+                               &s_eth_to_wifi_task_handle);
+        ESP_RETURN_ON_FALSE(task_ret == pdPASS, ESP_ERR_NO_MEM,
+                            TAG, "创建 ETH->WiFi 转发任务失败");
+    }
 
     ESP_RETURN_ON_ERROR(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
                                                    z1mini_bridge_eth_event_handler, NULL),
@@ -389,6 +874,21 @@ static esp_err_t z1mini_bridge_start_ports(void)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "设置透传 AP 为默认 netif 失败: 0x%x (%s)", ret, esp_err_to_name(ret));
     }
+
+#if Z1MINI_BRIDGE_STATS_ENABLE
+    if (!s_stats_task_handle) {
+        task_ret = xTaskCreate(z1mini_bridge_stats_task,
+                               "z1_bridge_stat",
+                               Z1MINI_BRIDGE_STATS_TASK_STACK,
+                               NULL,
+                               Z1MINI_BRIDGE_STATS_TASK_PRIO,
+                               &s_stats_task_handle);
+        if (task_ret != pdPASS) {
+            s_stats_task_handle = NULL;
+            ESP_LOGW(TAG, "创建透传统计任务失败");
+        }
+    }
+#endif
 
     ESP_LOGI(TAG, "已启用 AP 与以太网原始帧转发");
     return ESP_OK;
