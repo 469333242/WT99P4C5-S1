@@ -45,6 +45,10 @@ static void wifi_sta_confirm_guard_task(void *arg)
 {
     (void)arg;
 
+    /*
+     * STA 配置保存后设备会重启并尝试连路由器。
+     * 若用户无法在网页上确认新地址可达，超时自动回退 AP，避免设备被错误 STA 配置锁死。
+     */
     ESP_LOGW(TAG, "STA 模式待网页确认，%d 秒内未确认将自动回退到 AP 模式",
              WIFI_STA_CONFIRM_TIMEOUT_MS / 1000);
     vTaskDelay(pdMS_TO_TICKS(WIFI_STA_CONFIRM_TIMEOUT_MS));
@@ -73,6 +77,7 @@ static void wifi_start_sta_confirm_guard_if_needed(void)
         return;
     }
 
+    /* 只有待确认的 STA 配置才启动保护任务，已确认配置正常启动不额外重启。 */
     BaseType_t task_ret = xTaskCreate(wifi_sta_confirm_guard_task,
                                       "sta_confirm_guard",
                                       4096,
@@ -455,6 +460,7 @@ static esp_err_t wifi_start_sta(void)
         ESP_LOGW(TAG, "关闭 STA 省电模式失败: 0x%x (%s)", ret, esp_err_to_name(ret));
     }
 
+    /* 视频流和网页控制更看重稳定低延迟，STA 模式关闭省电并提高发射功率。 */
     ret = esp_wifi_set_max_tx_power(84);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "设置 Wi-Fi 发射功率失败: 0x%x (%s)", ret, esp_err_to_name(ret));

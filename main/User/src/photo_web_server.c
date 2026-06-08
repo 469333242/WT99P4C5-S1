@@ -1872,6 +1872,7 @@ static bool photo_web_relative_path_is_safe(const char *relative_path)
         return false;
     }
 
+    /* 删除接口接收的是相对路径，同样只允许媒体命名会产生的字符，避免路径穿越。 */
     for (p = relative_path; *p; p++)
     {
         if ((*p >= '0' && *p <= '9') ||
@@ -2252,6 +2253,11 @@ static esp_err_t photo_web_parse_a3_record_param(const char *body,
     }
 
     memset(param, 0, sizeof(*param));
+
+    /*
+     * A3 record-param 请求体很小且字段固定，使用轻量字段提取即可。
+     * 解析后仍校验 channel 和分段间隔，避免其它接口误发 JSON 触发录像/拍照。
+     */
     ESP_RETURN_ON_ERROR(photo_web_json_get_u32(body, "channel", &param->channel),
                         TAG, "读取 A3 channel 失败");
     ESP_RETURN_ON_ERROR(photo_web_json_get_bool(body, "record", &param->record),
@@ -2362,6 +2368,10 @@ static void photo_web_hold_external_capture_for_photo(void)
 {
     uint32_t generation;
 
+    /*
+     * 单次拍照没有持续 RTSP 客户端时也需要临时保持采集。
+     * generation 用来识别旧的延时释放任务，避免后来的拍照/录像被旧任务提前关掉。
+     */
     photo_web_set_external_capture_active(true);
 
     portENTER_CRITICAL(&s_photo_web_a3_lock);
@@ -2611,6 +2621,7 @@ static esp_err_t photo_web_delete_media_file(const char *relative_path)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* 只允许删除本系统生成的 photo/jpeg 与 video/mp4，禁止借接口删除其它 TF 文件。 */
     if (strstr(relative_path, "/photo/") != NULL && photo_web_has_jpeg_suffix(relative_path))
     {
         subdir = "photo";
@@ -3445,6 +3456,10 @@ static esp_err_t photo_web_api_a3_record_param_handler(httpd_req_t *req)
         return photo_web_send_json_error(req, "400 Bad Request", "A3 时间参数非法");
     }
 
+    /*
+     * A3 调用这个接口时同时承担“同步设备时间”和“控制录像/拍照”两个动作。
+     * 时间先同步，后续媒体命名和默认日期目录修正才能使用真实日期。
+     */
     ret = media_storage_set_video_segment_seconds(param.file_switch_interval);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "A3 设置录像分段间隔失败: 0x%x (%s)", ret, esp_err_to_name(ret));
@@ -3493,6 +3508,7 @@ static esp_err_t photo_web_api_a3_record_param_handler(httpd_req_t *req)
         }
 
         if (!param.record) {
+            /* 仅拍照不录像时，短暂拉起采集链路，等下一帧到达后自动释放。 */
             photo_web_hold_external_capture_for_photo();
         }
     }
@@ -3532,6 +3548,7 @@ static esp_err_t photo_web_api_capture_handler(httpd_req_t *req)
     ret = media_storage_request_photo();
     if (ret == ESP_OK)
     {
+        /* Web 手动拍照同样需要在无 RTSP 客户端时临时保持采集。 */
         photo_web_hold_external_capture_for_photo();
         httpd_resp_set_type(req, "application/json; charset=utf-8");
         photo_web_set_no_cache(req);
@@ -3699,6 +3716,10 @@ static esp_err_t photo_web_parse_range_request(httpd_req_t *req, uint64_t file_s
     range->end = (file_size > 0U) ? (file_size - 1U) : 0U;
     range->length = file_size;
 
+    /*
+     * 浏览器播放 MP4 会使用 Range 做拖动和分段加载。
+     * 未带 Range 时按整文件响应，带 Range 时严格校验边界并返回 206/416。
+     */
     header_len = httpd_req_get_hdr_value_len(req, "Range");
     if (header_len == 0U)
     {

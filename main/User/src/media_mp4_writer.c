@@ -159,6 +159,10 @@ static esp_err_t media_mp4_writer_build_codec_spec_info(
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * esp_muxer 需要带起始码的 codec specific info。
+     * SPS/PPS 由录像入口在 IDR 帧附近缓存，本层只拼成 muxer 需要的 Annex-B 片段。
+     */
     buf = (uint8_t *)malloc(total_len);
     if (!buf) {
         return ESP_ERR_NO_MEM;
@@ -297,6 +301,7 @@ esp_err_t media_mp4_writer_open(media_mp4_writer_t *writer, const char *path,
     muxer_cfg.base_config.ram_cache_size = MP4_MUXER_RAM_CACHE_SIZE;
     muxer_cfg.base_config.no_key_frame_verify = true;
     muxer_cfg.display_in_order = true;
+    /* 边录边写到 TF 卡，moov 放在 mdat 后面；关闭 muxer 时再完成索引写入。 */
     muxer_cfg.moov_before_mdat = false;
 
     muxer_ret = mp4_muxer_register();

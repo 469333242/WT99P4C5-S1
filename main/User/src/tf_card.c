@@ -151,7 +151,10 @@ static esp_err_t tf_card_prepare_power_ctrl_locked(sdmmc_host_t *host)
             .flags.adjustable = true,
         };
 
-        /* P4 板卡在 TF 协商前需要先打开 TF IO 电源。 */
+        /*
+         * P4 板卡在 TF 协商前需要先打开 TF IO 电源。
+         * 这里把 LDO 封装成 SDMMC power-control 句柄，后续电压切换由 SDMMC 驱动统一调用。
+         */
         s_tf.pwr_ctrl_handle = calloc(1, sizeof(sd_pwr_ctrl_drv_t));
         if (!s_tf.pwr_ctrl_handle) {
             ESP_LOGE(TAG, "创建 TF 供电控制句柄失败");
@@ -428,6 +431,10 @@ esp_err_t tf_card_run_speed_test(tf_card_speed_test_result_t *out_result)
 
     remove(TF_CARD_SPEED_TEST_FILE_NAME);
 
+    /*
+     * 测速使用固定临时文件顺序写入/读取并 fsync。
+     * 结果只作为网页提示和容量估算参考，不在录像热路径中反复执行。
+     */
     fp = fopen(TF_CARD_SPEED_TEST_FILE_NAME, "wb");
     if (!fp) {
         free(buf);

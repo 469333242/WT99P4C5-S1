@@ -459,6 +459,10 @@ static void camera_osd_build_timestamp_text(char *text, size_t text_size)
         return;
     }
 
+    /*
+     * 采集帧率高于时间戳变化频率，按秒缓存文本，避免每帧都 localtime/strftime。
+     * OSD 默认关闭时不会进入这里。
+     */
     if (!cached_valid || cached_sec != tv.tv_sec) {
         if (tv.tv_sec >= CAM_OSD_VALID_UNIX_SEC) {
             struct tm tm_info = {0};
@@ -530,6 +534,10 @@ static void flush_stale_capture_buffers(void)
 {
     uint32_t flushed = 0;
 
+    /*
+     * 摄像头暂停期间驱动队列里可能残留旧帧。
+     * 恢复采集时先非阻塞丢掉这些缓冲，避免 RTSP/拍照拿到暂停前的画面。
+     */
     for (uint32_t i = 0; i < CAM_STALE_FLUSH_MAX; i++) {
         struct v4l2_buffer buf;
         memset(&buf, 0, sizeof(buf));
@@ -585,6 +593,10 @@ void camera_set_external_active(bool active)
         return;
     }
 
+    /*
+     * 外部保持位由网页/A3 拍照录像使用，RTSP 播放位由客户端连接数使用。
+     * 任一来源需要画面时都保持采集，全部清空后 cam_task 才会停在事件等待处。
+     */
     if (active) {
         xEventGroupSetBits(s_cam_event, CAM_EXTERNAL_START_BIT);
     } else {

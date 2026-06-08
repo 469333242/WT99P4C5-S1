@@ -311,6 +311,10 @@ static void z1mini_bridge_eth_to_wifi_task(void *arg)
     (void)arg;
 
     while (1) {
+        /*
+         * 以太网 RX 回调由驱动上下文触发，不能在回调里直接做 Wi-Fi 发送。
+         * 先把帧所有权交给队列任务，发送完成后统一释放 buffer。
+         */
         if (xQueueReceive(s_eth_to_wifi_queue, &frame, portMAX_DELAY) != pdTRUE) {
             continue;
         }
@@ -585,6 +589,7 @@ static esp_err_t z1mini_bridge_wifi_rx(void *buffer, uint16_t len, void *eb)
     if (buffer != NULL && z1mini_bridge_is_valid_eth_frame(len) &&
         s_eth_handle != NULL && s_eth_link_up) {
         eth_len = (len < Z1MINI_BRIDGE_ETH_MIN_TX_LEN) ? Z1MINI_BRIDGE_ETH_MIN_TX_LEN : len;
+        /* 以太网最小帧长 60 字节，Wi-Fi 收到的短帧转发到 PHY 前需要补零。 */
         eth_buffer = calloc(1, eth_len);
         if (eth_buffer != NULL) {
             memcpy(eth_buffer, buffer, len);
@@ -645,6 +650,10 @@ static esp_err_t z1mini_bridge_eth_rx(esp_eth_handle_t eth_handle, uint8_t *buff
 #endif
 
         if (s_eth_to_wifi_queue) {
+            /*
+             * 入队成功后 buffer 所有权转移给 z1mini_bridge_eth_to_wifi_task。
+             * 入队失败或帧非法时本函数负责释放，避免驱动分配的 RX buffer 泄漏。
+             */
             frame.buffer = buffer;
             frame.len = (uint16_t)len;
 

@@ -178,6 +178,10 @@ static bool device_web_config_import_legacy(const device_web_config_storage_v1_t
         return false;
     }
 
+    /*
+     * 旧版 NVS blob 没有后续新增字段。
+     * 迁移时先填默认配置，再只复制旧版存在且校验通过的字段，防止未初始化字节进入运行配置。
+     */
     device_web_config_get_defaults(out_config);
     out_config->uart0_baud_rate = legacy->config.uart0_baud_rate;
     out_config->uart1_baud_rate = legacy->config.uart1_baud_rate;
@@ -270,6 +274,10 @@ static bool device_web_config_import_v4(const device_web_config_storage_t *legac
     device_web_config_get_defaults(&defaults);
     *out_config = legacy->config;
 
+    /*
+     * V4 已接近当前结构，但可能缺少新字段或保存过非法值。
+     * 逐项兜底比整体丢弃配置更温和，用户已有的可用配置会被保留。
+     */
     if (!device_web_config_is_valid_baud_rate(out_config->uart0_baud_rate)) {
         out_config->uart0_baud_rate = defaults.uart0_baud_rate;
     }
@@ -354,6 +362,10 @@ static bool device_web_config_import_v5(const device_web_config_storage_t *legac
     }
 
     *out_config = legacy->config;
+    /*
+     * V5 还没有独立保存 pending-confirm 标志。
+     * 若启动在 STA 模式，迁移后先视为待确认，避免升级后配置了错误路由器导致设备失联。
+     */
     *out_flags = (legacy->config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) ?
                  DEVICE_WEB_CONFIG_FLAG_STA_PENDING_CONFIRM : 0U;
 
@@ -634,6 +646,10 @@ esp_err_t device_web_config_init(void)
     device_web_config_get_defaults(&default_config);
     device_web_config_fill_storage(&s_device_web_config_storage, &default_config);
 
+    /*
+     * NVS 中只保存一个 blob，但历史版本结构体大小不同。
+     * 先按 blob 大小判断候选版本，再走对应迁移函数，保证老固件升级后仍能读取配置。
+     */
     ret = nvs_open(DEVICE_WEB_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (ret == ESP_OK) {
         memset(&loaded_storage, 0, sizeof(loaded_storage));
@@ -810,6 +826,7 @@ static esp_err_t device_web_config_save_with_flags(const device_web_config_t *co
     device_web_config_fill_storage(&new_storage, config);
     new_storage.reserved = flags;
 
+    /* reserved 当前用作运行保护标志位，不放进公开配置结构，避免网页配置和保护状态互相覆盖。 */
     ret = nvs_open(DEVICE_WEB_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "打开设备网页配置命名空间失败: 0x%x (%s)",

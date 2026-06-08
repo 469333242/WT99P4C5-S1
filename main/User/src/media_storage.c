@@ -116,6 +116,7 @@ typedef struct {
 typedef struct {
     bool                  initialized;
     bool                  session_ready;
+    bool                  session_rename_busy;    /* 时间同步修正旧目录期间置位，阻止新的拍照/录像抢占目录 */
     bool                  photo_pending;
     bool                  photo_job_busy;
     uint32_t              photo_skip_frames;
@@ -148,8 +149,8 @@ typedef struct {
     bool                  video_record_requested;
     bool                  video_overwrite_allowed;
     bool                  tf_overwriting_old_video;
-    bool                  video_gap_pending;
-    bool                  video_save_current_gop;
+    bool                  video_gap_pending;      /* 录像旁路发生丢帧后，等待下一帧 IDR 再继续写入 */
+    bool                  video_save_current_gop; /* 当前 GOP 是否进入 MP4，拥塞时按 GOP 丢弃以保持文件可解码 */
     TaskHandle_t          video_task_handle;
     QueueHandle_t         video_queue;
     media_storage_video_frame_t video_frames[MEDIA_STORAGE_VIDEO_QUEUE_LEN];
@@ -570,6 +571,10 @@ static esp_err_t media_storage_delete_oldest_video_file(char *deleted_path, size
     char selected_file_path[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
     bool found = false;
 
+    /*
+     * 空间回收只删除 video 子目录下的 mp4 文件。
+     * 照片不参与循环覆盖，目录按 session 序号从旧到新查找，避免误删用户刚拍的照片。
+     */
     root_dir = opendir(tf_card_get_mount_point());
     if (!root_dir) {
         ESP_LOGW(TAG, "打开 TF 根目录失败，无法清理旧视频: errno=%d", errno);
@@ -726,6 +731,298 @@ static esp_err_t media_storage_build_session_root(char *dst, size_t dst_size,
     }
 
     return ret;
+}
+
+static bool media_storage_parse_session_name_date(const char *name, uint32_t *out_seq,
+                                                  const char **out_date_tag)
+{
+    const char *cursor = name;
+    const char *date_tag = NULL;
+    uint32_t value = 0;
+
+    if (!name || name[0] == '\0') {
+        return false;
+    }
+
+    while (*cursor >= '0' && *cursor <= '9') {
+        value = value * 10U + (uint32_t)(*cursor - '0');
+        cursor++;
+    }
+
+    if (cursor == name || *cursor != '_') {
+        return false;
+    }
+
+    date_tag = cursor + 1;
+    if (strlen(date_tag) != (MEDIA_STORAGE_DATE_TAG_LEN - 1U)) {
+        return false;
+    }
+    for (size_t i = 0; i < (MEDIA_STORAGE_DATE_TAG_LEN - 1U); i++) {
+        if (date_tag[i] < '0' || date_tag[i] > '9') {
+            return false;
+        }
+    }
+
+    if (out_seq) {
+        *out_seq = value;
+    }
+    if (out_date_tag) {
+        *out_date_tag = date_tag;
+    }
+    return true;
+}
+
+static bool media_storage_begin_session_rename_if_idle(void)
+{
+    bool started = false;
+
+    /*
+     * 同步时间后的旧目录重命名只在媒体链路空闲时进行。
+     * 这里和拍照/录像请求共用同一把自旋锁，确保“检查空闲”和“置忙”是原子的。
+     */
+    portENTER_CRITICAL(&s_media_lock);
+    if (!s_media.session_rename_busy &&
+        !s_media.photo_pending && !s_media.photo_job_busy &&
+        !s_media.video_record_requested) {
+        s_media.session_rename_busy = true;
+        started = true;
+    }
+    portEXIT_CRITICAL(&s_media_lock);
+
+    return started;
+}
+
+static void media_storage_end_session_rename(void)
+{
+    portENTER_CRITICAL(&s_media_lock);
+    s_media.session_rename_busy = false;
+    portEXIT_CRITICAL(&s_media_lock);
+}
+
+static bool media_storage_is_session_rename_busy(void)
+{
+    bool busy = false;
+
+    portENTER_CRITICAL(&s_media_lock);
+    busy = s_media.session_rename_busy;
+    portEXIT_CRITICAL(&s_media_lock);
+
+    return busy;
+}
+
+static esp_err_t media_storage_build_session_paths(uint32_t seq, const char *date_tag,
+                                                   char *root_dir, size_t root_dir_size,
+                                                   char *photo_dir, size_t photo_dir_size,
+                                                   char *video_dir, size_t video_dir_size)
+{
+    esp_err_t ret;
+
+    if (!root_dir || root_dir_size == 0U || !date_tag) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ret = media_storage_build_session_root(root_dir, root_dir_size,
+                                           tf_card_get_mount_point(), seq, date_tag);
+    if (ret == ESP_OK && photo_dir && photo_dir_size > 0U) {
+        ret = media_storage_join_path(photo_dir, photo_dir_size,
+                                      root_dir, MEDIA_STORAGE_PHOTO_SUBDIR);
+    }
+    if (ret == ESP_OK && video_dir && video_dir_size > 0U) {
+        ret = media_storage_join_path(video_dir, video_dir_size,
+                                      root_dir, MEDIA_STORAGE_VIDEO_SUBDIR);
+    }
+
+    return ret;
+}
+
+static esp_err_t media_storage_rename_session_date(uint32_t seq,
+                                                   const char *from_date_tag,
+                                                   const char *to_date_tag,
+                                                   char *new_root_dir,
+                                                   size_t new_root_dir_size)
+{
+    char old_root_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    char target_root_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    esp_err_t ret;
+
+    if (!from_date_tag || !to_date_tag || !new_root_dir || new_root_dir_size == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strcmp(from_date_tag, to_date_tag) == 0) {
+        return ESP_OK;
+    }
+
+    ret = media_storage_build_session_paths(seq, from_date_tag,
+                                            old_root_dir, sizeof(old_root_dir),
+                                            NULL, 0U, NULL, 0U);
+    if (ret == ESP_OK) {
+        ret = media_storage_build_session_paths(seq, to_date_tag,
+                                                target_root_dir, sizeof(target_root_dir),
+                                                NULL, 0U, NULL, 0U);
+    }
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (!media_storage_is_dir(old_root_dir)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (media_storage_is_dir(target_root_dir)) {
+        ESP_LOGW(TAG, "目标媒体目录已存在，跳过重命名: %s", target_root_dir);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (rename(old_root_dir, target_root_dir) != 0) {
+        ESP_LOGW(TAG, "重命名默认日期媒体目录失败: %s -> %s, errno=%d",
+                 old_root_dir, target_root_dir, errno);
+        return ESP_FAIL;
+    }
+
+    ret = media_storage_copy_text(new_root_dir, new_root_dir_size, target_root_dir);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "已修正默认日期媒体目录: %s -> %s", old_root_dir, target_root_dir);
+    return ESP_OK;
+}
+
+static bool media_storage_find_next_default_session_dir(bool has_last_seq,
+                                                        uint32_t last_seq,
+                                                        uint32_t *out_seq)
+{
+    DIR *root_dir = NULL;
+    struct dirent *entry = NULL;
+    bool found = false;
+    uint32_t selected_seq = UINT32_MAX;
+
+    if (!out_seq) {
+        return false;
+    }
+
+    root_dir = opendir(tf_card_get_mount_point());
+    if (!root_dir) {
+        ESP_LOGW(TAG, "打开 TF 根目录失败，无法查找默认日期媒体目录: errno=%d", errno);
+        return false;
+    }
+
+    while ((entry = readdir(root_dir)) != NULL) {
+        const char *old_date_tag = NULL;
+        uint32_t seq = 0;
+
+        if (entry->d_name[0] == '.' ||
+            !media_storage_parse_session_name_date(entry->d_name, &seq, &old_date_tag) ||
+            strcmp(old_date_tag, MEDIA_STORAGE_DEFAULT_DATE_TAG) != 0) {
+            continue;
+        }
+
+        if (has_last_seq && seq <= last_seq) {
+            continue;
+        }
+
+        if (!found || seq < selected_seq) {
+            selected_seq = seq;
+            found = true;
+        }
+    }
+
+    closedir(root_dir);
+    if (found) {
+        *out_seq = selected_seq;
+    }
+    return found;
+}
+
+static void media_storage_refresh_current_session_paths(uint32_t seq,
+                                                        const char *date_tag,
+                                                        const char *root_dir)
+{
+    char photo_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+    char video_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+
+    if (!date_tag || !root_dir) {
+        return;
+    }
+
+    if (media_storage_join_path(photo_dir, sizeof(photo_dir),
+                                root_dir, MEDIA_STORAGE_PHOTO_SUBDIR) != ESP_OK ||
+        media_storage_join_path(video_dir, sizeof(video_dir),
+                                root_dir, MEDIA_STORAGE_VIDEO_SUBDIR) != ESP_OK ||
+        media_storage_copy_text(s_media.session_root_dir,
+                                sizeof(s_media.session_root_dir), root_dir) != ESP_OK ||
+        media_storage_copy_text(s_media.photo_dir,
+                                sizeof(s_media.photo_dir), photo_dir) != ESP_OK ||
+        media_storage_copy_text(s_media.video_dir,
+                                sizeof(s_media.video_dir), video_dir) != ESP_OK ||
+        media_storage_copy_text(s_media.session_date_tag,
+                                sizeof(s_media.session_date_tag), date_tag) != ESP_OK) {
+        ESP_LOGW(TAG, "刷新当前媒体目录路径失败，后续保存仍可能使用旧目录");
+        return;
+    }
+
+    s_media.session_seq = seq;
+}
+
+static void media_storage_rename_default_session_dirs_after_time_sync(const char *date_tag)
+{
+    uint32_t renamed_count = 0;
+    uint32_t skipped_count = 0;
+    uint32_t last_seq = 0;
+    bool has_last_seq = false;
+
+    if (!date_tag || strcmp(date_tag, MEDIA_STORAGE_DEFAULT_DATE_TAG) == 0 ||
+        !s_media.initialized || !s_media.session_mutex || !tf_card_is_mounted()) {
+        return;
+    }
+
+    if (media_mp4_writer_is_open(&s_media.video_writer) ||
+        !media_storage_begin_session_rename_if_idle()) {
+        ESP_LOGW(TAG, "当前存在拍照或录像任务，跳过默认日期媒体目录重命名");
+        return;
+    }
+
+    if (xSemaphoreTake(s_media.session_mutex, portMAX_DELAY) != pdTRUE) {
+        ESP_LOGW(TAG, "获取媒体目录锁失败，跳过默认日期媒体目录重命名");
+        media_storage_end_session_rename();
+        return;
+    }
+
+    /*
+     * 每次重新扫描下一个默认日期目录，而不是在 readdir 遍历过程中直接改名。
+     * FAT 目录项被 rename 后迭代器位置可能失效，分步扫描更稳。
+     */
+    while (true) {
+        uint32_t seq = 0;
+        char new_root_dir[MEDIA_STORAGE_MAX_PATH_LEN] = {0};
+        esp_err_t ret;
+
+        if (!media_storage_find_next_default_session_dir(has_last_seq, last_seq, &seq)) {
+            break;
+        }
+        last_seq = seq;
+        has_last_seq = true;
+
+        ret = media_storage_rename_session_date(seq, MEDIA_STORAGE_DEFAULT_DATE_TAG, date_tag,
+                                                new_root_dir, sizeof(new_root_dir));
+        if (ret != ESP_OK) {
+            skipped_count++;
+            continue;
+        }
+
+        renamed_count++;
+        if (s_media.session_ready && s_media.session_seq == seq &&
+            strcmp(s_media.session_date_tag, MEDIA_STORAGE_DEFAULT_DATE_TAG) == 0) {
+            media_storage_refresh_current_session_paths(seq, date_tag, new_root_dir);
+        }
+    }
+
+    xSemaphoreGive(s_media.session_mutex);
+    media_storage_end_session_rename();
+
+    if (renamed_count > 0U || skipped_count > 0U) {
+        ESP_LOGI(TAG, "默认日期媒体目录修正完成 | 成功=%" PRIu32 " | 跳过=%" PRIu32,
+                 renamed_count, skipped_count);
+    }
 }
 
 static esp_err_t media_storage_build_photo_file_path(char *dst, size_t dst_size,
@@ -936,6 +1233,10 @@ static bool media_storage_should_skip_video_input(esp_h264_frame_type_t frame_ty
     bool pressure_worsened = false;
     const uint32_t base_interval = media_storage_base_save_interval();
 
+    /*
+     * 录像保存是 RTSP 编码链路的旁路，不能反向阻塞摄像头任务。
+     * 队列积压时优先降低写卡压力：按 GOP 选择保存、必要时抽掉非 IDR，严重时标记 gap 等下一帧 IDR 恢复。
+     */
     portENTER_CRITICAL(&s_media_lock);
     if (s_media.video_adaptive_save_interval < base_interval) {
         s_media.video_adaptive_save_interval = base_interval;
@@ -1124,6 +1425,10 @@ static bool media_storage_should_skip_video_gap_frame(bool is_idr)
 {
     bool gap_pending;
 
+    /*
+     * 丢过帧后继续写 P 帧会引用已经缺失的画面，MP4 虽能生成但播放容易花屏。
+     * 因此 gap 状态下跳过非 IDR，等 IDR 到来后从完整参考帧重新开始。
+     */
     portENTER_CRITICAL(&s_media_lock);
     gap_pending = s_media.video_gap_pending;
     if (gap_pending && is_idr) {
@@ -1161,6 +1466,40 @@ static bool media_storage_is_time_valid(time_t unix_sec)
     return unix_sec >= MEDIA_STORAGE_VALID_UNIX_SEC;
 }
 
+static esp_err_t media_storage_format_date_tag(char *date_tag, size_t date_tag_size,
+                                               const struct tm *tm_info)
+{
+    int year;
+    int month;
+    int day;
+
+    if (!date_tag || date_tag_size < MEDIA_STORAGE_DATE_TAG_LEN || !tm_info) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    year = tm_info->tm_year + 1900;
+    month = tm_info->tm_mon + 1;
+    day = tm_info->tm_mday;
+
+    if (year < 0 || year > 9999 ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* 手工写 8 位日期，避免小缓冲上的 snprintf 截断告警被 -Werror 放大为编译失败。 */
+    date_tag[0] = (char)('0' + (year / 1000) % 10);
+    date_tag[1] = (char)('0' + (year / 100) % 10);
+    date_tag[2] = (char)('0' + (year / 10) % 10);
+    date_tag[3] = (char)('0' + year % 10);
+    date_tag[4] = (char)('0' + (month / 10) % 10);
+    date_tag[5] = (char)('0' + month % 10);
+    date_tag[6] = (char)('0' + (day / 10) % 10);
+    date_tag[7] = (char)('0' + day % 10);
+    date_tag[8] = '\0';
+    return ESP_OK;
+}
+
 static void media_storage_build_timestamp(char *date_tag, size_t date_tag_size,
                                           char *timestamp, size_t timestamp_size)
 {
@@ -1175,8 +1514,9 @@ static void media_storage_build_timestamp(char *date_tag, size_t date_tag_size,
 
         localtime_r(&sec, &tm_info);
 
-        snprintf(date_tag, date_tag_size, "%04d%02d%02d",
-                 tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday);
+        if (media_storage_format_date_tag(date_tag, date_tag_size, &tm_info) != ESP_OK) {
+            (void)media_storage_copy_text(date_tag, date_tag_size, MEDIA_STORAGE_DEFAULT_DATE_TAG);
+        }
         snprintf(timestamp, timestamp_size, "%04d-%02d-%02dT%02d-%02d-%02d-%03" PRIu32,
                  tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
                  tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, msec);
@@ -1189,7 +1529,7 @@ static void media_storage_build_timestamp(char *date_tag, size_t date_tag_size,
         uint32_t minute = (total_sec % 3600U) / 60U;
         uint32_t second = total_sec % 60U;
 
-        snprintf(date_tag, date_tag_size, "%s", MEDIA_STORAGE_DEFAULT_DATE_TAG);
+        (void)media_storage_copy_text(date_tag, date_tag_size, MEDIA_STORAGE_DEFAULT_DATE_TAG);
         snprintf(timestamp, timestamp_size, "%sT%02" PRIu32 "-%02" PRIu32 "-%02" PRIu32 "-%03" PRIu32,
                  MEDIA_STORAGE_DEFAULT_DATE_TEXT, hour, minute, second, msec);
         if (!s_default_time_warned) {
@@ -1720,6 +2060,11 @@ static void media_storage_photo_task(void *arg)
             media_storage_finish_photo_job();
             continue;
         }
+        if (media_storage_is_session_rename_busy()) {
+            ESP_LOGW(TAG, "默认日期媒体目录正在重命名，跳过本次拍照任务");
+            media_storage_finish_photo_job();
+            continue;
+        }
 
         media_storage_build_timestamp(date_tag, sizeof(date_tag), timestamp, sizeof(timestamp));
 
@@ -1738,6 +2083,8 @@ static void media_storage_photo_task(void *arg)
         }
         if (ret == ESP_OK) {
             uint32_t photo_index = s_media.photo_count + 1U;
+
+            /* 照片文件名最后三位使用本次上电会话内的照片序号，不使用时间戳毫秒数。 */
             ret = media_storage_build_photo_file_path(file_path, sizeof(file_path),
                                                       s_media.photo_dir, timestamp,
                                                       photo_index);
@@ -2007,6 +2354,10 @@ static esp_err_t media_storage_video_open_segment(void)
 
     if (!tf_card_is_mounted()) {
         ESP_LOGW(TAG, "TF 卡未挂载，无法创建录像分段");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (media_storage_is_session_rename_busy()) {
+        ESP_LOGW(TAG, "默认日期媒体目录正在重命名，暂不创建录像分段");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -2283,6 +2634,10 @@ static void media_storage_video_task(void *arg)
     (void)arg;
 
     while (1) {
+        /*
+         * 摄像头任务只负责快速拷贝和入队，实际写 MP4 放到后台任务。
+         * 写卡慢或 TF 抖动时最多影响录像旁路，不拖慢实时推流。
+         */
         if (xQueueReceive(s_media.video_queue, &slot_index,
                           pdMS_TO_TICKS(MEDIA_STORAGE_VIDEO_WAIT_MS)) == pdTRUE) {
             if (slot_index < s_media.video_slot_count) {
@@ -2318,9 +2673,11 @@ esp_err_t media_storage_sync_time_from_unix_ms(int64_t unix_ms)
 {
     struct timeval tv = {0};
     struct tm tm_info = {0};
+    char date_tag[MEDIA_STORAGE_DATE_TAG_LEN] = {0};
     time_t sec;
     int64_t valid_unix_ms = MEDIA_STORAGE_VALID_UNIX_SEC * MEDIA_STORAGE_UNIX_MSEC_PER_SEC;
     int64_t msec;
+    esp_err_t ret;
 
     if (unix_ms < valid_unix_ms) {
         ESP_LOGW(TAG, "忽略无效时间同步请求: unix_ms=%" PRId64, unix_ms);
@@ -2340,9 +2697,20 @@ esp_err_t media_storage_sync_time_from_unix_ms(int64_t unix_ms)
     }
 
     localtime_r(&sec, &tm_info);
+    ret = media_storage_format_date_tag(date_tag, sizeof(date_tag), &tm_info);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "同步时间日期超出媒体目录命名范围");
+        return ret;
+    }
     ESP_LOGI(TAG, "系统时间已同步: %04d-%02d-%02d %02d:%02d:%02d.%03" PRId64,
              tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
              tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, msec);
+
+    /*
+     * 上电未同步时间时会先写入 19800106 目录。
+     * 时间同步成功后立即尝试修正旧目录名；若此刻正在拍照/录像，会安全跳过。
+     */
+    media_storage_rename_default_session_dirs_after_time_sync(date_tag);
     return ESP_OK;
 }
 
@@ -2590,6 +2958,11 @@ esp_err_t media_storage_request_photo(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (media_storage_is_session_rename_busy()) {
+        ESP_LOGW(TAG, "默认日期媒体目录正在重命名，暂时拒绝拍照请求");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     ret = tf_card_get_info(&tf_info);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "读取 TF 卡状态失败，拒绝拍照请求: 0x%x (%s)",
@@ -2602,7 +2975,9 @@ esp_err_t media_storage_request_photo(void)
     }
 
     portENTER_CRITICAL(&s_media_lock);
-    if (!s_media.photo_pending && !s_media.photo_job_busy) {
+    /* 拍照请求只置 pending，真正保存发生在下一帧 YUV 到来后，保证照片来自实时画面。 */
+    if (!s_media.session_rename_busy &&
+        !s_media.photo_pending && !s_media.photo_job_busy) {
         s_media.photo_pending = true;
         s_media.photo_skip_frames = 0;
         accepted = true;
@@ -2610,7 +2985,11 @@ esp_err_t media_storage_request_photo(void)
     portEXIT_CRITICAL(&s_media_lock);
 
     if (!accepted) {
-        ESP_LOGW(TAG, "已有拍照任务正在处理中，忽略新的拍照请求");
+        if (media_storage_is_session_rename_busy()) {
+            ESP_LOGW(TAG, "默认日期媒体目录正在重命名，忽略新的拍照请求");
+        } else {
+            ESP_LOGW(TAG, "已有拍照任务正在处理中，忽略新的拍照请求");
+        }
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -2644,6 +3023,11 @@ void media_storage_start_video_record(void)
         return;
     }
 
+    if (media_storage_is_session_rename_busy()) {
+        ESP_LOGW(TAG, "默认日期媒体目录正在重命名，忽略录像请求");
+        return;
+    }
+
     ret = tf_card_get_info(&tf_info);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "读取 TF 卡状态失败，忽略录像请求: 0x%x (%s)",
@@ -2658,7 +3042,8 @@ void media_storage_start_video_record(void)
     prepared = s_media.video_prepared;
     if (!prepared) {
         portENTER_CRITICAL(&s_media_lock);
-        if (!s_media.video_record_requested) {
+        /* 摄像头尚未给出编码参数时先记住录像意图，prepare 完成后自动恢复请求。 */
+        if (!s_media.session_rename_busy && !s_media.video_record_requested) {
             s_media.video_record_requested = true;
             s_media.video_overwrite_allowed = false;
             s_media.tf_overwriting_old_video = false;
@@ -2674,6 +3059,9 @@ void media_storage_start_video_record(void)
         }
         portEXIT_CRITICAL(&s_media_lock);
 
+        if (!need_log && media_storage_is_session_rename_busy()) {
+            ESP_LOGW(TAG, "默认日期媒体目录正在重命名，忽略录像请求");
+        }
         if (need_log) {
             ESP_LOGW(TAG, "录像缓冲尚未准备完成，已保留录像请求");
         }
@@ -2687,7 +3075,8 @@ void media_storage_start_video_record(void)
     }
 
     portENTER_CRITICAL(&s_media_lock);
-    if (!s_media.video_record_requested) {
+    /* 录像从下一帧 IDR 开始建段，保证 MP4 分段开头具备完整解码参考。 */
+    if (!s_media.session_rename_busy && !s_media.video_record_requested) {
         s_media.video_record_requested = true;
         s_media.video_overwrite_allowed = false;
         s_media.tf_overwriting_old_video = false;
@@ -2703,6 +3092,9 @@ void media_storage_start_video_record(void)
     }
     portEXIT_CRITICAL(&s_media_lock);
 
+    if (!need_log && media_storage_is_session_rename_busy()) {
+        ESP_LOGW(TAG, "默认日期媒体目录正在重命名，忽略录像请求");
+    }
     if (need_log) {
         ESP_LOGI(TAG, "录像请求已生效，等待下一帧 IDR 创建 MP4 分段");
     }
@@ -2792,6 +3184,7 @@ void media_storage_process_h264_frame(const uint8_t *h264_buf, size_t h264_len,
         return;
     }
 
+    /* 后台队列满时直接丢弃当前帧，避免摄像头/RTSP 被写卡速度反压。 */
     if (h264_len > s_media.video_frame_buf_size) {
         media_storage_log_video_drop("frame_too_large", h264_len);
         return;

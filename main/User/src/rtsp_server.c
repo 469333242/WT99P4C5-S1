@@ -308,6 +308,10 @@ static void mark_client_wait_for_idr_locked(rtsp_client_t *c)
         return;
     }
 
+    /*
+     * 客户端丢过帧或发送失败后，旧队列中的 P 帧可能引用了已经缺失的参考帧。
+     * 清空队列并等待下一帧 IDR，牺牲几帧延迟换取重新解码后的画面稳定。
+     */
     c->wait_for_idr = true;
     flush_client_queue_locked(c);
 }
@@ -720,7 +724,10 @@ void rtsp_push_h264_frame(const uint8_t *h264_buf, size_t h264_len,
         }
     }
 
-    /* 为每个活跃客户端预留一块独立发送缓冲，避免发送中被下一帧覆盖 */
+    /*
+     * 为每个活跃客户端预留独立发送缓冲。
+     * 队列长度刻意保持为 1：网络慢时丢旧帧，优先让客户端看到最新实时画面。
+     */
     frame_with_nalus_t frames[MAX_CLIENTS];
     memset(frames, 0, sizeof(frames));
     if (xSemaphoreTake(s_clients_mutex, RTSP_TRY_LOCK_TICKS) != pdTRUE) {
@@ -1206,6 +1213,10 @@ static void handle_rtsp_session_stream(rtsp_client_t *c)
 
         while (cursor < buffer_end) {
             if (*cursor == '$') {
+                /*
+                 * RTSP over TCP 会把 RTP/RTCP 数据和控制报文复用在同一条连接上。
+                 * 客户端发来的 interleaved 数据包不是 RTSP 请求，解析控制报文前需要跳过。
+                 */
                 if ((size_t)(buffer_end - cursor) < RTCP_INTERLEAVE_HDR) {
                     break;
                 }
@@ -1468,7 +1479,7 @@ esp_err_t rtsp_server_start(void)
         s_clients[i].frame_queue = xQueueCreate(FRAME_QUEUE_LEN, sizeof(frame_with_nalus_t));
         if (!s_clients[i].frame_queue) return ESP_ERR_NO_MEM;
 
-        /* 预分配帧缓冲池（避免运行时malloc）*/
+        /* 预分配帧缓冲池，推流热路径只做拷贝和入队，避免运行时 malloc 抖动。 */
         for (int j = 0; j < FRAME_POOL_SIZE; j++) {
             s_clients[i].frame_pool[j] = heap_caps_malloc(MAX_FRAME_SIZE,
                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

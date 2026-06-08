@@ -265,6 +265,10 @@ static esp_err_t ftp_normalize_path(const char *cwd, const char *arg,
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * FTP 客户端看到的是以 / 为根的虚拟路径。
+     * 这里先合并 cwd 和参数，再消解 . / ..，防止客户端跳出 TF 卡挂载点。
+     */
     input = ftp_strip_quotes(arg, quoted, sizeof(quoted));
     if (!input || input[0] == '\0') {
         input = cwd;
@@ -320,6 +324,7 @@ static esp_err_t ftp_build_local_path(const char *virtual_path,
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* 虚拟根目录固定映射到 TF 卡挂载点，FTP 层不暴露设备上的其它路径。 */
     if (strcmp(virtual_path, "/") == 0) {
         len = snprintf(local_path, local_path_size, "%s", tf_card_get_mount_point());
     } else {
@@ -342,6 +347,7 @@ static bool ftp_is_tmp_name(const char *name)
         return false;
     }
     len = strlen(name);
+    /* .tmp 是正在写入的 MP4 分段，列表和下载都隐藏，避免客户端下载到未封口文件。 */
     return len >= 4U && strcasecmp(name + len - 4U, ".tmp") == 0;
 }
 
@@ -542,6 +548,10 @@ static esp_err_t ftp_open_data_reply(ftp_session_t *session, const char *message
         return ESP_ERR_INVALID_STATE;
     }
 
+    /*
+     * 仅支持 PASV/EPSV 被动数据连接。
+     * 设备常运行在 AP 或 NAT 后面，主动模式需要设备反连客户端，兼容性和安全边界都更差。
+     */
     ftp_sendf(session->ctrl_fd, "150 %s\r\n", message ? message : "Opening data connection.");
     data_fd = ftp_accept_data_connection(session);
     if (data_fd < 0) {
@@ -899,6 +909,7 @@ static bool ftp_handle_command(ftp_session_t *session, char *line)
     } else if (strcmp(cmd, "EPSV") == 0) {
         ftp_create_passive_listener(session, true);
     } else if (strcmp(cmd, "PORT") == 0 || strcmp(cmd, "EPRT") == 0) {
+        /* 主动模式关闭，统一要求客户端走被动模式下载。 */
         ftp_sendf(session->ctrl_fd, "502 Active mode is disabled. Use PASV or EPSV.\r\n");
     } else if (strcmp(cmd, "LIST") == 0) {
         ftp_handle_list(session, arg, false);
@@ -923,6 +934,7 @@ static bool ftp_handle_command(ftp_session_t *session, char *line)
                strcmp(cmd, "XMKD") == 0 || strcmp(cmd, "RMD") == 0 ||
                strcmp(cmd, "XRMD") == 0 || strcmp(cmd, "RNFR") == 0 ||
                strcmp(cmd, "RNTO") == 0 || strcmp(cmd, "SITE") == 0) {
+        /* FTP 服务定位为远程取文件，上传、删除、改名和建目录全部拒绝。 */
         ftp_sendf(session->ctrl_fd, "550 Permission denied.\r\n");
     } else if (strcmp(cmd, "QUIT") == 0) {
         ftp_sendf(session->ctrl_fd, "221 Goodbye.\r\n");

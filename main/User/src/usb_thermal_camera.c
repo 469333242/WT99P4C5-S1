@@ -116,8 +116,8 @@ typedef struct {
 } usb_thermal_camera_event_t;
 
 typedef struct {
-    SemaphoreHandle_t frame_mutex;
-    SemaphoreHandle_t convert_mutex;
+    SemaphoreHandle_t frame_mutex;   /* 保护 latest_y16 和帧元信息 */
+    SemaphoreHandle_t convert_mutex; /* 串行化灰度/伪彩转换，复用 convert_y16 临时缓冲 */
     uvc_host_stream_hdl_t stream_hdl;
     uint8_t dev_addr;
     uint8_t *latest_y16;
@@ -853,6 +853,10 @@ static esp_err_t usb_thermal_prepare_latest_buffer(uint32_t width, uint32_t heig
         }
     }
 
+    /*
+     * 转换函数会先拿 convert_mutex 再拿 frame_mutex。
+     * 这里重建缓冲也保持同样锁顺序，避免热插拔/分辨率变化时形成死锁。
+     */
     if (s_capture.convert_mutex &&
         xSemaphoreTake(s_capture.convert_mutex, portMAX_DELAY) != pdTRUE) {
         free(new_latest_buf);
@@ -970,6 +974,10 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
         goto return_frame;
     }
 
+    /*
+     * UVC 回调运行在 USB 传输路径上，不能等待应用层转换完成。
+     * 拿不到锁就丢当前帧，优先保证 USB BULK 传输持续回收缓冲。
+     */
     if (xSemaphoreTake(capture->frame_mutex, 0) == pdTRUE) {
         size_t y16_len = frame->data_len;
         uint16_t min_value = 0;
@@ -2111,6 +2119,10 @@ esp_err_t usb_thermal_camera_get_latest_gray8(uint8_t *out_buf, size_t out_buf_s
         return ESP_ERR_INVALID_STATE;
     }
 
+    /*
+     * 转换耗时明显长于复制最新帧。
+     * 先把 latest_y16 拷到 convert_y16，再释放 frame_mutex，让采集回调尽快继续写入新帧。
+     */
     if (xSemaphoreTake(s_capture.convert_mutex, pdMS_TO_TICKS(USB_THERMAL_CAMERA_FRAME_WAIT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
@@ -2212,6 +2224,10 @@ esp_err_t usb_thermal_camera_get_latest_gray_oue_vyy(uint8_t *out_buf, size_t ou
         return ESP_ERR_INVALID_STATE;
     }
 
+    /*
+     * 输出给 H.264 编码器的是 O_UYY_E_VYY：两像素共用色度，偶数行放 U、奇数行放 V。
+     * Y16 到伪彩的转换在本地完成，不依赖厂商私有成像命令。
+     */
     if (xSemaphoreTake(s_capture.convert_mutex, pdMS_TO_TICKS(USB_THERMAL_CAMERA_FRAME_WAIT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
