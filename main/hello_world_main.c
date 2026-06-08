@@ -11,11 +11,13 @@
  *   - camera           : OV5647 MIPI-CSI 采集 + H.264 编码 + 推流
  *   - usb_thermal_camera: USB UVC 热像仪持续采集与灰度帧转换
  *   - tcp_uart_server  : TCP-UART 双向透传（端口 8880/8881）
+ *   - ftp_server       : TF 卡只读 FTP 文件获取（端口 21）
  *
  * 访问方式：
  *   视频流  : rtsp://<设备IP>
  *   吊舱流  : rtsp://192.168.144.108
  *   网页    : http://<设备IP>/
+ *   FTP     : ftp://ftpuser:ftpuser@<设备IP>
  *   串口0   : TCP <设备IP>:8880
  *   串口1   : TCP <设备IP>:8881
  */
@@ -43,6 +45,7 @@
 #include "tcp_uart_server.h"
 #include "tf_card.h"
 #include "usb_thermal_camera.h"
+#include "ftp_server.h"
 
 /* 网络连接模式选择：优先使用 Z-1mini 网口透传；关闭后再按 USE_ETHERNET 选择普通网络模式 */
 #define Z1MINI_BRIDGE_ENABLE   1   //Z-1mini 网口透传：WiFi AP + 以太网原始帧转发
@@ -261,6 +264,16 @@ void app_main(void)
         ESP_LOGW(TAG, "媒体网页服务启动失败: 0x%x", err);
     } else {
         ESP_LOGI(TAG, "媒体网页服务已启动，访问地址: http://<设备IP>/");
+    }
+
+    /* 启动 TF 卡只读 FTP 文件获取服务（端口 21）
+     * 当前用于远程列目录和下载文件，不提供上传、删除或改名。 */
+    err = ftp_server_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "FTP 文件获取服务启动失败: 0x%x", err);
+    } else {
+        ESP_LOGI(TAG, "FTP 文件获取服务已启动，访问地址: ftp://%s:%s@<设备IP>",
+                 FTP_SERVER_USER, FTP_SERVER_PASSWORD);
     }
 
     /* 5. 启动 RTSP 服务器（默认 554，兼容热像仪地址 580/live/6） */
