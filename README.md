@@ -162,15 +162,15 @@ TF 卡挂载点：
 媒体目录结构：
 
 ```text
-/sdcard/<session>/photo/<timestamp>.jpeg
+/sdcard/<session>/photo/<time>-<photo_index>.jpeg
 /sdcard/<session>/video/<timestamp>_<segment>.mp4
 ```
 
 示例：
 
 ```text
-/sdcard/001_20260608/photo/2026-06-08T10-20-15-123.jpeg
-/sdcard/001_20260608/video/2026-06-08T10-20-15-123_0001.mp4
+/sdcard/001_20260608/photo/2026-06-08T10-20-15-001.jpeg
+/sdcard/001_20260608/video/2026-06-08T10-20-15-123_002.mp4
 ```
 
 存储策略：
@@ -344,4 +344,3 @@ idf.py flash monitor
 - USB 热像仪厂商私有调色命令默认关闭，当前采用本机 Y16 转换成像。
 - `UART1` TCP 透传服务默认未在启动流程中启用。
 - RTSP 客户端数、HTTP 连接和 TCP-UART 连接共享 socket 资源，当前 LWIP 最大 socket 数为 `20`。
-

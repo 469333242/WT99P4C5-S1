@@ -730,14 +730,39 @@ static esp_err_t media_storage_build_session_root(char *dst, size_t dst_size,
 
 static esp_err_t media_storage_build_photo_file_path(char *dst, size_t dst_size,
                                                      const char *photo_dir,
-                                                     const char *timestamp)
+                                                     const char *timestamp,
+                                                     uint32_t photo_index)
 {
     esp_err_t ret;
     size_t offset = 0;
+    int index_len;
+    char index_text[16] = {0};
+    char photo_timestamp[MEDIA_STORAGE_TIMESTAMP_LEN] = {0};
+    const char *suffix = NULL;
+    size_t prefix_len;
 
     if (!dst || dst_size == 0U || !photo_dir || !timestamp) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    suffix = strrchr(timestamp, '-');
+    if (!suffix || suffix == timestamp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    prefix_len = (size_t)(suffix - timestamp + 1);
+    if (prefix_len >= sizeof(photo_timestamp)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    index_len = snprintf(index_text, sizeof(index_text), "%03" PRIu32, photo_index);
+    if (index_len < 0 || index_len >= (int)sizeof(index_text) ||
+        prefix_len + (size_t)index_len >= sizeof(photo_timestamp)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(photo_timestamp, timestamp, prefix_len);
+    memcpy(photo_timestamp + prefix_len, index_text, (size_t)index_len + 1U);
 
     dst[0] = '\0';
     ret = media_storage_append_text(dst, dst_size, &offset, photo_dir);
@@ -745,7 +770,7 @@ static esp_err_t media_storage_build_photo_file_path(char *dst, size_t dst_size,
         ret = media_storage_append_text(dst, dst_size, &offset, "/");
     }
     if (ret == ESP_OK) {
-        ret = media_storage_append_text(dst, dst_size, &offset, timestamp);
+        ret = media_storage_append_text(dst, dst_size, &offset, photo_timestamp);
     }
     if (ret == ESP_OK) {
         ret = media_storage_append_text(dst, dst_size, &offset, ".jpeg");
@@ -769,7 +794,7 @@ static esp_err_t media_storage_build_video_file_path(char *dst, size_t dst_size,
         return ESP_ERR_INVALID_ARG;
     }
 
-    index_len = snprintf(index_text, sizeof(index_text), "%04" PRIu32, segment_index);
+    index_len = snprintf(index_text, sizeof(index_text), "%03" PRIu32, segment_index);
     if (index_len < 0 || index_len >= (int)sizeof(index_text)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -1712,8 +1737,10 @@ static void media_storage_photo_task(void *arg)
             ret = media_storage_prepare_session(date_tag);
         }
         if (ret == ESP_OK) {
+            uint32_t photo_index = s_media.photo_count + 1U;
             ret = media_storage_build_photo_file_path(file_path, sizeof(file_path),
-                                                      s_media.photo_dir, timestamp);
+                                                      s_media.photo_dir, timestamp,
+                                                      photo_index);
         }
         if (ret == ESP_OK) {
             ret = media_storage_write_file(file_path, s_media.jpeg_out_buf, jpeg_len);
@@ -2072,7 +2099,7 @@ static esp_err_t media_storage_video_open_segment(void)
     s_media.video_switch_pending = false;
     media_storage_set_video_overwrite_allowed(true);
 
-    ESP_LOGI(TAG, "录像分段已创建 | 序号=%04" PRIu32 " | 临时文件=%s",
+    ESP_LOGI(TAG, "录像分段已创建 | 序号=%03" PRIu32 " | 临时文件=%s",
              s_media.video_segment_index, s_media.video_tmp_path);
     return ESP_OK;
 }
@@ -2087,7 +2114,7 @@ static void media_storage_video_abort_segment(void)
         remove(s_media.video_tmp_path);
     }
 
-    ESP_LOGW(TAG, "录像分段已丢弃 | 序号=%04" PRIu32, s_media.video_segment_index);
+    ESP_LOGW(TAG, "录像分段已丢弃 | 序号=%03" PRIu32, s_media.video_segment_index);
     media_storage_reset_video_segment_state();
 }
 
@@ -2117,7 +2144,7 @@ static esp_err_t media_storage_video_close_segment(void)
             return ESP_FAIL;
         }
 
-        ESP_LOGE(TAG, "关闭 MP4 分段失败 | 序号=%04" PRIu32 " | ret=0x%x (%s)",
+        ESP_LOGE(TAG, "关闭 MP4 分段失败 | 序号=%03" PRIu32 " | ret=0x%x (%s)",
                  segment_index, ret, esp_err_to_name(ret));
         return ret;
     }
@@ -2149,7 +2176,7 @@ static esp_err_t media_storage_video_close_segment(void)
         }
     }
 
-    ESP_LOGI(TAG, "录像保存成功 | 序号=%04" PRIu32 " | 帧数=%" PRIu32 " | 路径=%s",
+    ESP_LOGI(TAG, "录像保存成功 | 序号=%03" PRIu32 " | 帧数=%" PRIu32 " | 路径=%s",
              segment_index, frame_count, final_path);
     media_storage_reset_video_segment_state();
     return ESP_OK;
