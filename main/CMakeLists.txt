@@ -10,6 +10,7 @@ idf_component_register(SRCS "hello_world_main.c"
                              "User/src/ftp_server.c"
                              "User/src/eth_connect.c"
                              "User/src/z1mini_bridge.c"
+                             "User/src/z1mini_sta_relay.c"
                              "User/src/tf_card.c"
                              "User/src/usb_thermal_camera.c"
                        PRIV_REQUIRES

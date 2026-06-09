@@ -35,8 +35,9 @@
 
 /* 用户模块 */
 #include "wifi_connect.h"
-#include "eth_connect.h" 
+#include "eth_connect.h"
 #include "z1mini_bridge.h"
+#include "z1mini_sta_relay.h"
 #include "device_web_config.h"
 #include "rtsp_server.h"
 #include "camera.h"
@@ -47,8 +48,8 @@
 #include "usb_thermal_camera.h"
 #include "ftp_server.h"
 
-/* 网络连接模式选择：优先使用 Z-1mini 网口透传；关闭后再按 USE_ETHERNET 选择普通网络模式 */
-#define Z1MINI_BRIDGE_ENABLE   1   //Z-1mini 网口透传：WiFi AP + 以太网原始帧转发
+/* 网络连接模式选择：开启后 AP=Z-1mini 透传 AP，STA=Z-1mini STA 代理 */
+#define Z1MINI_BRIDGE_ENABLE   1
 #define USE_ETHERNET           0   //切换网络连接方式：0=WiFi, 1=以太网
 #define HOSTED_WIFI_READY_DELAY_MS 6000
 #define WIFI_WAIT_SLICE_MS         15000
@@ -73,6 +74,28 @@ static const char *TAG = "main";
 
 /* 用于等待 SDIO transport 就绪的二值信号量 */
 static SemaphoreHandle_t s_hosted_up_sem;
+
+static void hosted_event_handler(void *arg, esp_event_base_t base,
+                                  int32_t id, void *data);
+
+static void wait_for_hosted_wifi_ready(void)
+{
+    s_hosted_up_sem = xSemaphoreCreateBinary();
+    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID,
+                               hosted_event_handler, NULL);
+    esp_hosted_init();
+    esp_hosted_connect_to_slave();
+
+    ESP_LOGI(TAG, "等待 C5 建立 SDIO 连接...");
+    xSemaphoreTake(s_hosted_up_sem, portMAX_DELAY);
+    ESP_LOGI(TAG, "SDIO 连接已建立");
+
+    /*
+     * TRANSPORT_UP 只代表主从数据链路就绪，远端 C5 的 Wi-Fi 固件和射频初始化
+     * 还需要一点时间。保留原有启动等待，避免过早下发 Wi-Fi 配置。
+     */
+    vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
+}
 
 /**
  * @brief MIPI 摄像头初始化任务
@@ -146,43 +169,62 @@ void app_main(void)
     esp_event_loop_create_default();
 
 #if Z1MINI_BRIDGE_ENABLE
-    /* Z-1mini 网口透传：电脑连接 AP 后与吊舱处在同一个 192.168.144.0/24 网段。 */
-    ESP_LOGI(TAG, "使用 Z-1mini 网口透传 | WT99=%s | 吊舱=%s | RTSP=%s",
-             Z1MINI_BRIDGE_IP, Z1MINI_DEVICE_IP, Z1MINI_RTSP_URL);
+    wait_for_hosted_wifi_ready();
 
-    /* 3. ESP-Hosted：建立与 C5 的 SDIO 链路 */
-    s_hosted_up_sem = xSemaphoreCreateBinary();
-    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID,
-                                hosted_event_handler, NULL);
-    esp_hosted_init();
-    esp_hosted_connect_to_slave();
+    if (app_config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_AP) {
+        ESP_LOGI(TAG, "使用 Z-1mini 透传 AP | WT99=%s | 吊舱=%s | RTSP=%s",
+                 Z1MINI_BRIDGE_IP, Z1MINI_DEVICE_IP, Z1MINI_RTSP_URL);
 
-    ESP_LOGI(TAG, "等待与 C5 建立 SDIO 连接...");
-    xSemaphoreTake(s_hosted_up_sem, portMAX_DELAY);
-    ESP_LOGI(TAG, "SDIO 连接已建立");
+        err = z1mini_bridge_init(Z1MINI_BRIDGE_IP,
+                                 Z1MINI_BRIDGE_GW,
+                                 Z1MINI_BRIDGE_MASK,
+                                 Z1MINI_DEVICE_IP);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Z-1mini 透传 AP 初始化失败: 0x%x", err);
+            return;
+        }
 
-    /* 4. 启动 WiFi AP + 以太网原始帧转发，吊舱 UDP/RTSP 保持同网段透传。 */
-    vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
-    err = z1mini_bridge_init(Z1MINI_BRIDGE_IP,
-                             Z1MINI_BRIDGE_GW,
-                             Z1MINI_BRIDGE_MASK,
-                             Z1MINI_DEVICE_IP);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Z-1mini 网口透传初始化失败: 0x%x", err);
-        return;
-    }
+        ESP_LOGI(TAG, "等待透传 AP 就绪...");
+        while ((err = z1mini_bridge_wait_for_ready(Z1MINI_BRIDGE_WAIT_SLICE_MS)) != ESP_OK) {
+            ESP_LOGW(TAG, "透传 AP 尚未就绪，继续等待...");
+        }
 
-    ESP_LOGI(TAG, "等待透传 AP 就绪...");
-    while ((err = z1mini_bridge_wait_for_ready(Z1MINI_BRIDGE_WAIT_SLICE_MS)) != ESP_OK) {
-        ESP_LOGW(TAG, "透传 AP 尚未就绪，继续等待...");
-    }
+        ESP_LOGI(TAG, "透传 AP 已就绪，正在检测吊舱网口链路...");
+        err = z1mini_bridge_wait_for_eth_link(Z1MINI_BRIDGE_WAIT_SLICE_MS);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "吊舱网口链路已连接 | 吊舱访问地址: %s", Z1MINI_RTSP_URL);
+        } else {
+            ESP_LOGW(TAG, "吊舱网口链路暂未连接，继续启动本机服务；请检查吊舱供电和网线");
+        }
+    } else if (app_config.wifi_mode == DEVICE_WEB_CONFIG_WIFI_MODE_STA) {
+        ESP_LOGI(TAG, "使用 Z-1mini STA 入网模式 | STA=%s | 吊舱=%s",
+                 app_config.wifi_sta_ssid, Z1MINI_DEVICE_IP);
 
-    ESP_LOGI(TAG, "透传 AP 已就绪，正在检测吊舱网口链路...");
-    err = z1mini_bridge_wait_for_eth_link(Z1MINI_BRIDGE_WAIT_SLICE_MS);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "吊舱网口链路已连接 | 吊舱访问地址: %s", Z1MINI_RTSP_URL);
+        err = wifi_connect_init();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi STA 初始化失败: 0x%x", err);
+            return;
+        }
+
+        ESP_LOGI(TAG, "等待 WiFi STA 网络就绪...");
+        while ((err = wifi_connect_wait_for_ip(WIFI_WAIT_SLICE_MS)) != ESP_OK) {
+            ESP_LOGW(TAG, "WiFi STA 网络尚未就绪，继续等待...");
+        }
+
+        err = z1mini_sta_relay_start(Z1MINI_BRIDGE_IP,
+                                     Z1MINI_BRIDGE_GW,
+                                     Z1MINI_BRIDGE_MASK,
+                                     Z1MINI_DEVICE_IP);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Z-1mini STA 代理启动失败: 0x%x", err);
+            return;
+        }
+
+        ESP_LOGI(TAG, "Z-1mini STA Proxy ARP 已就绪 | QGC 可尝试 rtsp://%s",
+                 Z1MINI_DEVICE_IP);
     } else {
-        ESP_LOGW(TAG, "吊舱网口链路暂未连接，继续启动本机服务；请检查吊舱供电和网线");
+        ESP_LOGE(TAG, "Wi-Fi 模式配置非法: %" PRIu32, app_config.wifi_mode);
+        return;
     }
 
     err = wifi_connect_wait_for_time(WIFI_TIME_WAIT_MS);
@@ -208,25 +250,11 @@ void app_main(void)
     ESP_LOGI(TAG, "以太网 IP 已就绪，开始启动视频与网页服务");
 
 #else
-    /* 使用 WiFi，具体 AP/STA 场景由网页配置决定。 */
     ESP_LOGI(TAG, "使用 WiFi 网络模式: %s",
              device_web_config_get_wifi_mode_name(app_config.wifi_mode));
 
-    /* 3. ESP-Hosted：建立与 C5 的 SDIO 链路 */
-    s_hosted_up_sem = xSemaphoreCreateBinary();
-    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID,
-                                hosted_event_handler, NULL);
-    esp_hosted_init();
-    esp_hosted_connect_to_slave();
+    wait_for_hosted_wifi_ready();
 
-    ESP_LOGI(TAG, "等待与 C5 建立 SDIO 连接...");
-    xSemaphoreTake(s_hosted_up_sem, portMAX_DELAY);
-    ESP_LOGI(TAG, "SDIO 连接已建立");
-
-    /* 4. WiFi 网络启动 */
-    /* SDIO TRANSPORT_UP 仅代表数据链路就绪，C5 WiFi 固件与射频初始化
-     * 还需要额外时间。保留启动等待，避免过早创建 AP 时射频尚未就绪。 */
-    vTaskDelay(pdMS_TO_TICKS(HOSTED_WIFI_READY_DELAY_MS));
     err = wifi_connect_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi 初始化失败: 0x%x", err);
